@@ -1,0 +1,12 @@
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+backend/data/
+backend/.coverage
+ios/DerivedData/
+ios/*.xcodeproj/xcuserdata/
+*.xcuserstate
+

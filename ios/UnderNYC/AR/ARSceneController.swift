@@ -1,0 +1,956 @@
+import ARKit
+import CoreLocation
+import Foundation
+import RealityKit
+import UIKit
+
+enum StreetLocalizationMode: Equatable {
+    case checkingAvailability
+    case visualLocalizing
+    case visuallyLocalized
+    case cinematicDemo
+    case unavailable
+
+    var isPrecise: Bool {
+        switch self {
+        case .visuallyLocalized, .cinematicDemo:
+            true
+        default:
+            false
+        }
+    }
+}
+
+extension ARSceneController: ARSessionDelegate {
+    nonisolated func session(
+        _ session: ARSession,
+        didChange geoTrackingStatus: ARGeoTrackingStatus
+    ) {
+        Task { @MainActor [weak self] in
+            self?.handleGeoTrackingStatus(geoTrackingStatus)
+        }
+    }
+
+}
+
+@MainActor
+final class ARSceneController: NSObject, ObservableObject {
+    private struct VisualProgress {
+        let segmentID: String?
+        var chainageMeters: Double
+        var nextStopChainageMeters: Double
+        var speedMetersPerSecond: Double
+        var updatedAt: TimeInterval
+        var sourceObservedAt: Date
+        var sourceMeanChainageMeters: Double
+
+        func chainage(at timestamp: TimeInterval) -> Double {
+            min(
+                nextStopChainageMeters,
+                chainageMeters
+                    + speedMetersPerSecond * max(0, timestamp - updatedAt)
+            )
+        }
+    }
+
+    @Published private(set) var edgeIndicator = EdgeIndicatorState()
+    @Published private(set) var trackingDescription = "Starting AR"
+    @Published private(set) var arrivalAligned = false
+    @Published private(set) var viewHeadingDegrees: Double?
+    @Published private(set) var streetLocalizationMode: StreetLocalizationMode =
+        .checkingAvailability
+
+    let arView = ARView(frame: .zero)
+    var onTrainSelected: ((String?) -> Void)?
+    var onCameraOrientationSample: ((Double, TimeInterval) -> Void)?
+
+    private var origin: CLLocationCoordinate2D?
+    private var currentCoordinate: CLLocationCoordinate2D?
+    private var currentAltitudeMeters: Double?
+    private var altitudeReferenceMeters: Double?
+    private var currentHeadingEstimate = HeadingEstimate.unavailable
+    private var displayMode: ARDisplayMode = .street
+    private var root = AnchorEntity(world: .zero)
+    private let contentRoot = Entity()
+    private var markers: [String: ModelEntity] = [:]
+    private var detailedMarkerIDs = Set<String>()
+    private var markerYawRadians: [String: Float] = [:]
+    private var markerSegmentIDs: [String: String] = [:]
+    private var visualProgress: [String: VisualProgress] = [:]
+    private var projectedMarkerPaths: [String: [SIMD3<Float>]] = [:]
+    private var latestTrains: [String: NearbyTrain] = [:]
+    private var selectedID: String?
+    private var routeEntity: Entity?
+    private var arrivalAxisForward: SIMD3<Float>?
+    private var arrivalAnchorPosition: SIMD3<Float>?
+    private var indicatorTimer: Timer?
+    private var isRunning = false
+    private var geoAvailabilityCheckInFlight = false
+    private var isGeoTrackingSession = false
+    private var cinematicDemoEnabled = false
+
+    override init() {
+        super.init()
+        root.addChild(contentRoot)
+        arView.session.delegate = self
+        arView.environment.sceneUnderstanding.options = []
+        arView.renderOptions.insert(.disableMotionBlur)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        arView.addGestureRecognizer(tap)
+        indicatorTimer = Timer.scheduledTimer(
+            withTimeInterval: 1.0 / 30.0,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.advanceMarkers()
+                self?.updateIndicator()
+            }
+        }
+    }
+
+    func start(at location: CLLocation) {
+        guard ARWorldTrackingConfiguration.isSupported else {
+            trackingDescription = "AR world tracking is unavailable on this iPhone"
+            return
+        }
+        if let origin,
+           GeoCoordinateConverter.distanceMeters(
+               from: origin, to: location.coordinate
+           ) > 150 {
+            reset(at: location.coordinate)
+            return
+        }
+        guard !isRunning else { return }
+        origin = location.coordinate
+        currentCoordinate = location.coordinate
+        updateAltitude(from: location, relativeAltitudeMeters: nil)
+        beginBestAvailableStreetSession(at: location)
+    }
+
+    private func beginBestAvailableStreetSession(at location: CLLocation) {
+        if cinematicDemoEnabled {
+            runCinematicDemoSession()
+            return
+        }
+        guard !geoAvailabilityCheckInFlight else { return }
+        guard ARGeoTrackingConfiguration.isSupported else {
+            runOutdoorUnavailableSession()
+            return
+        }
+        geoAvailabilityCheckInFlight = true
+        streetLocalizationMode = .checkingAvailability
+        trackingDescription = "Checking Apple visual geolocation"
+        ARGeoTrackingConfiguration.checkAvailability(
+            at: location.coordinate
+        ) { @Sendable [weak self] available, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.geoAvailabilityCheckInFlight = false
+                guard !self.cinematicDemoEnabled else { return }
+                if available {
+                    self.runGeoTrackingSession()
+                } else {
+                    self.runOutdoorUnavailableSession()
+                }
+            }
+        }
+    }
+
+    private func runGeoTrackingSession() {
+        prepareRootForNewSession()
+        let configuration = ARGeoTrackingConfiguration()
+        configuration.environmentTexturing = .automatic
+        arView.session.run(
+            configuration,
+            options: [.resetTracking, .removeExistingAnchors]
+        )
+        arView.scene.addAnchor(root)
+        isRunning = true
+        isGeoTrackingSession = true
+        contentRoot.orientation = simd_quatf(
+            angle: 0,
+            axis: SIMD3<Float>(0, 1, 0)
+        )
+        streetLocalizationMode = .visualLocalizing
+        trackingDescription = "Matching the camera view to Apple Maps"
+    }
+
+    private func runOutdoorUnavailableSession() {
+        prepareRootForNewSession()
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.worldAlignment = .gravity
+        configuration.environmentTexturing = .automatic
+        arView.session.run(
+            configuration,
+            options: [.resetTracking, .removeExistingAnchors]
+        )
+        arView.scene.addAnchor(root)
+        isRunning = true
+        isGeoTrackingSession = false
+        contentRoot.orientation = simd_quatf(
+            angle: 0,
+            axis: SIMD3<Float>(0, 1, 0)
+        )
+        root.isEnabled = false
+        streetLocalizationMode = .unavailable
+        trackingDescription = "Outdoor visual positioning unavailable"
+    }
+
+    private func runCinematicDemoSession() {
+        prepareRootForNewSession()
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.worldAlignment = .gravityAndHeading
+        configuration.environmentTexturing = .automatic
+        arView.session.run(
+            configuration,
+            options: [.resetTracking, .removeExistingAnchors]
+        )
+        arView.scene.addAnchor(root)
+        isRunning = true
+        isGeoTrackingSession = false
+        contentRoot.orientation = simd_quatf(
+            angle: 0,
+            axis: SIMD3<Float>(0, 1, 0)
+        )
+        root.isEnabled = true
+        streetLocalizationMode = .cinematicDemo
+        trackingDescription = "Cinematic demo — simulated route"
+    }
+
+    private func prepareRootForNewSession() {
+        root.removeFromParent()
+        contentRoot.removeFromParent()
+        root = AnchorEntity(world: .zero)
+        root.addChild(contentRoot)
+    }
+
+    func reset(at coordinate: CLLocationCoordinate2D) {
+        origin = coordinate
+        currentCoordinate = coordinate
+        viewHeadingDegrees = nil
+        markers.removeAll()
+        detailedMarkerIDs.removeAll()
+        markerYawRadians.removeAll()
+        markerSegmentIDs.removeAll()
+        visualProgress.removeAll()
+        projectedMarkerPaths.removeAll()
+        contentRoot.children.removeAll()
+        routeEntity = nil
+        clearArrivalAlignment()
+        isRunning = false
+        geoAvailabilityCheckInFlight = false
+        let altitude = currentAltitudeMeters ?? 0
+        beginBestAvailableStreetSession(at: CLLocation(
+            coordinate: coordinate,
+            altitude: altitude,
+            horizontalAccuracy: 20,
+            verticalAccuracy: 50,
+            timestamp: .now
+        ))
+    }
+
+    @discardableResult
+    func alignArrivalView() -> Bool {
+        guard displayMode == .arrival,
+              selectedID != nil,
+              let frame = arView.session.currentFrame
+        else { return false }
+        let rawForward = SIMD3<Float>(
+            -frame.camera.transform.columns.2.x,
+            0,
+            -frame.camera.transform.columns.2.z
+        )
+        guard simd_length(rawForward) > 0.001 else { return false }
+        arrivalAxisForward = simd_normalize(rawForward)
+        arrivalAnchorPosition = SIMD3(
+            frame.camera.transform.columns.3.x,
+            frame.camera.transform.columns.3.y,
+            frame.camera.transform.columns.3.z
+        )
+        arrivalAligned = true
+        root.isEnabled = true
+        resyncCurrentScene()
+        return true
+    }
+
+    func flipArrivalAlignment() {
+        guard let axis = arrivalAxisForward else { return }
+        arrivalAxisForward = -axis
+        resyncCurrentScene()
+    }
+
+    func clearArrivalAlignment() {
+        arrivalAxisForward = nil
+        arrivalAnchorPosition = nil
+        arrivalAligned = false
+        if displayMode == .arrival { root.isEnabled = false }
+    }
+
+    func retryAutomaticStreetLocalization() {
+        guard displayMode == .street, let coordinate = currentCoordinate else {
+            return
+        }
+        contentRoot.orientation = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+        isRunning = false
+        let altitude = currentAltitudeMeters ?? 0
+        beginBestAvailableStreetSession(at: CLLocation(
+            coordinate: coordinate,
+            altitude: altitude,
+            horizontalAccuracy: 20,
+            verticalAccuracy: 50,
+            timestamp: .now
+        ))
+    }
+
+    func setCinematicDemoEnabled(_ enabled: Bool, at location: CLLocation) {
+        guard cinematicDemoEnabled != enabled else { return }
+        cinematicDemoEnabled = enabled
+        origin = location.coordinate
+        currentCoordinate = location.coordinate
+        updateAltitude(from: location, relativeAltitudeMeters: nil)
+        isRunning = false
+        geoAvailabilityCheckInFlight = false
+        if enabled {
+            runCinematicDemoSession()
+        } else {
+            beginBestAvailableStreetSession(at: location)
+        }
+    }
+
+    private func handleGeoTrackingStatus(_ status: ARGeoTrackingStatus) {
+        guard isGeoTrackingSession, !cinematicDemoEnabled else { return }
+        switch (status.state, status.accuracy) {
+        case (.localized, .high), (.localized, .medium):
+            streetLocalizationMode = .visuallyLocalized
+            trackingDescription = "Apple visual geolocation locked"
+            contentRoot.orientation = simd_quatf(
+                angle: 0,
+                axis: SIMD3<Float>(0, 1, 0)
+            )
+        case (.notAvailable, _):
+            streetLocalizationMode = .unavailable
+            trackingDescription = "Outdoor visual positioning unavailable"
+            root.isEnabled = false
+        default:
+            streetLocalizationMode = .visualLocalizing
+            trackingDescription = "Matching the camera view to Apple Maps"
+        }
+    }
+
+    private func resyncCurrentScene() {
+        sync(
+            trains: Array(latestTrains.values),
+            selectedID: selectedID,
+            headingEstimate: currentHeadingEstimate,
+            displayMode: displayMode
+        )
+    }
+
+    func sync(
+        trains: [NearbyTrain],
+        selectedID: String?,
+        location: CLLocation? = nil,
+        headingEstimate: HeadingEstimate = .unavailable,
+        relativeAltitudeMeters: Double? = nil,
+        displayMode: ARDisplayMode = .street
+    ) {
+        let previousMode = self.displayMode
+        let previousSelectedID = self.selectedID
+        self.displayMode = displayMode
+        if previousMode != displayMode || (
+            displayMode == .arrival && previousSelectedID != selectedID
+        ) {
+            clearArrivalAlignment()
+        }
+        if let location { currentCoordinate = location.coordinate }
+        if let location {
+            updateAltitude(
+                from: location,
+                relativeAltitudeMeters: relativeAltitudeMeters
+            )
+        }
+        currentHeadingEstimate = headingEstimate
+        contentRoot.orientation = simd_quatf(
+            angle: 0,
+            axis: SIMD3<Float>(0, 1, 0)
+        )
+        guard let origin = self.origin ?? currentCoordinate, isRunning else { return }
+        latestTrains = Dictionary(uniqueKeysWithValues: trains.map { ($0.id, $0) })
+        self.selectedID = selectedID
+
+        // Street geometry is shown only after ARGeoTracking has established
+        // an outdoor visual/geographic lock. There is deliberately no compass
+        // or indoor landmark fallback: an unavailable lock must fail closed
+        // instead of rendering a convincingly wrong city direction.
+        let orientationIsUsable = displayMode == .arrival
+            ? arrivalAligned
+            : streetLocalizationMode.isPrecise
+        guard orientationIsUsable else {
+            root.isEnabled = false
+            edgeIndicator = EdgeIndicatorState()
+            return
+        }
+        root.isEnabled = true
+
+        let renderTrains = displayMode == .arrival
+            ? trains.filter { $0.id == selectedID }
+            : trains
+        let activeIDs = Set(renderTrains.map(\.id))
+        for (id, entity) in markers where !activeIDs.contains(id) {
+            entity.removeFromParent()
+            markers[id] = nil
+            detailedMarkerIDs.remove(id)
+            markerYawRadians[id] = nil
+            markerSegmentIDs[id] = nil
+            visualProgress[id] = nil
+            projectedMarkerPaths[id] = nil
+        }
+
+        for train in renderTrains {
+            updateVisualProgress(for: train)
+            if displayMode == .street {
+                projectedMarkerPaths[train.id] = projectedStreetPath(
+                    for: train,
+                    origin: origin
+                )
+            } else {
+                projectedMarkerPaths[train.id] = nil
+            }
+            // The selected target is the cinematic focus even when its MTA
+            // timing estimate is broad; uncertainty remains explicit in the
+            // route band and card rather than degrading it to an abstract box.
+            let shouldShowDetail = train.id == selectedID
+            let entity: ModelEntity
+            if let existing = markers[train.id],
+               detailedMarkerIDs.contains(train.id) == shouldShowDetail {
+                entity = existing
+            } else {
+                markers[train.id]?.removeFromParent()
+                markerSegmentIDs[train.id] = nil
+                markerYawRadians[train.id] = nil
+                entity = TrainEntityFactory.makeMarker(
+                    for: train,
+                    selected: train.id == selectedID,
+                    showDetailedModel: shouldShowDetail
+                )
+                markers[train.id] = entity
+                if shouldShowDetail {
+                    detailedMarkerIDs.insert(train.id)
+                } else {
+                    detailedMarkerIDs.remove(train.id)
+                }
+                contentRoot.addChild(entity)
+                let initial = markerEntityPosition(for: train, after: 0)
+                entity.position = initial
+            }
+            entity.position = markerEntityPosition(for: train, after: 0)
+            // The 30 Hz clock advances this marker along the exact projected
+            // rail polyline. Do not hand RealityKit a straight endpoint chord.
+            let geographicDistance = Float(train.distanceFromUserMeters)
+            TrainEntityFactory.applyAppearance(
+                to: entity,
+                train: train,
+                selected: train.id == selectedID,
+                distanceMeters: geographicDistance
+            )
+            updateMarkerOrientation(for: train, entity: entity)
+        }
+        redrawSelectedRoute(origin: origin)
+        updateIndicator()
+    }
+
+    func updateHeadingEstimate(_ estimate: HeadingEstimate) {
+        currentHeadingEstimate = estimate
+    }
+
+    private func markerPosition(
+        for train: NearbyTrain,
+        after seconds: TimeInterval
+    ) -> SIMD3<Float> {
+        let now = ProcessInfo.processInfo.systemUptime
+        let progress = visualProgress[train.id]
+        let visualChainage = progress?.chainage(at: now + seconds)
+        if displayMode == .arrival,
+           let axis = arrivalAxisForward,
+           let anchor = arrivalAnchorPosition,
+           let nextStop = progress?.nextStopChainageMeters
+                ?? train.nextStopChainageMeters,
+           let visualChainage {
+            let distanceToStation = max(0, nextStop - visualChainage)
+            let visualDistance = arrivalVisualDistance(
+                physicalMeters: distanceToStation
+            )
+            return anchor + axis * visualDistance + SIMD3<Float>(0, -0.75, 0)
+        }
+        if let path = projectedMarkerPaths[train.id],
+           let position = RouteRenderer.position(
+               along: path,
+               progress: streetProgress(
+                   for: train,
+                   visualChainage: visualChainage
+               )
+           ) {
+            return position
+        }
+        return displayPosition(
+            for: train.position,
+            depth: train.approximateDepthMeters,
+            targetAltitudeMeters: train.estimatedAltitudeMeters
+        )
+    }
+
+    private func markerEntityPosition(
+        for train: NearbyTrain,
+        after seconds: TimeInterval
+    ) -> SIMD3<Float> {
+        let trackPosition = markerPosition(for: train, after: seconds)
+        let selected = train.id == selectedID
+        let detailed = selected
+        let height = TrainEntityFactory.trackVerticalOffset(
+            selected: selected,
+            showDetailedModel: detailed,
+            distanceMeters: Float(train.distanceFromUserMeters),
+            lifeSized: train.positionMethod == "cinematic_demo" && selected
+        )
+        return trackPosition + SIMD3<Float>(0, height, 0)
+    }
+
+    private func updateVisualProgress(for train: NearbyTrain) {
+        guard let incomingMean = train.meanChainageMeters,
+              let nextStop = train.nextStopChainageMeters
+        else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let previous = visualProgress[train.id],
+           previous.segmentID == train.segmentId {
+            // Heading/location refreshes often resubmit the identical source
+            // observation. Do not retime the animation for those calls.
+            let isNewSourceInformation = train.observedAt != previous.sourceObservedAt
+                || incomingMean > previous.sourceMeanChainageMeters + 0.25
+            guard isNewSourceInformation else { return }
+            let monotonicMean = max(previous.chainage(at: now), incomingMean)
+            let remaining = max(0, nextStop - monotonicMean)
+            let speed = train.etaSeconds > 0
+                ? remaining / Double(train.etaSeconds)
+                : 0
+            visualProgress[train.id] = VisualProgress(
+                segmentID: train.segmentId,
+                chainageMeters: monotonicMean,
+                nextStopChainageMeters: nextStop,
+                speedMetersPerSecond: speed,
+                updatedAt: now,
+                sourceObservedAt: train.observedAt,
+                sourceMeanChainageMeters: incomingMean
+            )
+            return
+        }
+        let remaining = max(0, nextStop - incomingMean)
+        visualProgress[train.id] = VisualProgress(
+            segmentID: train.segmentId,
+            chainageMeters: incomingMean,
+            nextStopChainageMeters: nextStop,
+            speedMetersPerSecond: train.etaSeconds > 0
+                ? remaining / Double(train.etaSeconds)
+                : 0,
+            updatedAt: now,
+            sourceObservedAt: train.observedAt,
+            sourceMeanChainageMeters: incomingMean
+        )
+    }
+
+    private func markerTravelDirection(for train: NearbyTrain) -> SIMD2<Float> {
+        if displayMode == .arrival, let axis = arrivalAxisForward {
+            // The user points toward the incoming tunnel; the train travels
+            // from that direction back toward the platform/camera.
+            return SIMD2(-axis.x, -axis.z)
+        }
+        let visualChainage = visualProgress[train.id]?.chainage(
+            at: ProcessInfo.processInfo.systemUptime
+        )
+        if let path = projectedMarkerPaths[train.id],
+           let direction = RouteRenderer.direction(
+               along: path,
+               progress: streetProgress(
+                   for: train,
+                   visualChainage: visualChainage
+               )
+           ) {
+            return direction
+        }
+        return SIMD2<Float>(sin(Float(train.bearingDegrees * .pi / 180)),
+                            -cos(Float(train.bearingDegrees * .pi / 180)))
+    }
+
+    private func updateMarkerOrientation(
+        for train: NearbyTrain,
+        entity: ModelEntity
+    ) {
+        let travel = markerTravelDirection(for: train)
+        guard simd_length(travel) > 0.01 else { return }
+        var desired = atan2(travel.x, travel.y)
+        if let previous = markerYawRadians[train.id] {
+            // A rail axis has two equivalent orientations. Pick the one that
+            // is closest to the current model yaw so a noisy tangent can never
+            // trigger a gratuitous 180-degree spin.
+            let reversed = desired + .pi
+            let directDelta = abs(shortestYawDelta(from: previous, to: desired))
+            let reversedDelta = abs(shortestYawDelta(from: previous, to: reversed))
+            if reversedDelta < directDelta { desired = reversed }
+            desired = TrainEntityFactory.stabilizedYaw(
+                previous: previous,
+                desired: desired,
+                maximumDelta: .pi / 180
+            )
+        }
+        markerYawRadians[train.id] = desired
+        markerSegmentIDs[train.id] = train.segmentId
+        entity.orientation = simd_quatf(
+            angle: desired,
+            axis: SIMD3<Float>(0, 1, 0)
+        )
+    }
+
+    private func shortestYawDelta(from start: Float, to end: Float) -> Float {
+        let fullTurn = Float.pi * 2
+        var delta = (end - start).truncatingRemainder(dividingBy: fullTurn)
+        if delta > .pi { delta -= fullTurn }
+        if delta < -.pi { delta += fullTurn }
+        return delta
+    }
+
+    private func streetProgress(
+        for train: NearbyTrain,
+        visualChainage: Double?
+    ) -> Double {
+        guard let start = train.meanChainageMeters,
+              let end = train.nextStopChainageMeters,
+              end > start
+        else { return 0 }
+        return min(max(((visualChainage ?? start) - start) / (end - start), 0), 1)
+    }
+
+    private func projectedStreetPath(
+        for train: NearbyTrain,
+        origin: CLLocationCoordinate2D
+    ) -> [SIMD3<Float>] {
+        RouteRenderer.projectedPositions(
+            points: TrainMotionPredictor.routeToNextStop(of: train),
+            origin: origin,
+            depthMeters: effectiveVerticalDropMeters(
+                tunnelDepth: train.approximateDepthMeters,
+                targetAltitudeMeters: train.estimatedAltitudeMeters
+            )
+        )
+    }
+
+    private func advanceMarkers() {
+        guard isRunning else { return }
+        for (id, entity) in markers {
+            guard let train = latestTrains[id] else { continue }
+            entity.position = markerEntityPosition(for: train, after: 0)
+            updateMarkerOrientation(for: train, entity: entity)
+        }
+    }
+
+    private func arrivalVisualDistance(physicalMeters: Double) -> Float {
+        Float(min(42, max(5, sqrt(max(0, physicalMeters)) * 2.4)))
+    }
+
+    private func redrawSelectedRoute(origin: CLLocationCoordinate2D) {
+        routeEntity?.removeFromParent()
+        routeEntity = nil
+        guard let selectedID, let train = latestTrains[selectedID] else { return }
+        if displayMode == .arrival {
+            let arrival = makeArrivalVisualization(for: train)
+            contentRoot.addChild(arrival)
+            routeEntity = arrival
+            return
+        }
+        let container = Entity()
+        container.name = "selected-route"
+        let distance = Float(train.distanceFromUserMeters)
+        let gauge = TrainEntityFactory.displayedTrackGauge(
+            selected: true,
+            showDetailedModel: true,
+            distanceMeters: distance,
+            lifeSized: train.positionMethod == "cinematic_demo"
+        )
+        let railThickness = TrainEntityFactory.displayedRailThickness(
+            selected: true,
+            showDetailedModel: true,
+            distanceMeters: distance,
+            lifeSized: train.positionMethod == "cinematic_demo"
+        )
+        if train.positionRange.count >= 2 {
+            let uncertainty = RouteRenderer.makeRoute(
+                points: train.positionRange,
+                origin: origin,
+                depthMeters: effectiveVerticalDropMeters(
+                    tunnelDepth: train.approximateDepthMeters,
+                    targetAltitudeMeters: train.estimatedAltitudeMeters
+                ),
+                color: UIColor(hex: train.routeColor),
+                localScale: TrainEntityFactory.displayScale(
+                    distanceMeters: Float(train.distanceFromUserMeters)
+                ),
+                lineWidth: TrainEntityFactory.displayedUncertaintyWidth(
+                    selected: true,
+                    showDetailedModel: true,
+                    distanceMeters: distance,
+                    lifeSized: train.positionMethod == "cinematic_demo"
+                ),
+                opacity: 0.16
+            )
+            container.addChild(uncertainty)
+        }
+        let routePositions = projectedMarkerPaths[train.id]
+            ?? projectedStreetPath(for: train, origin: origin)
+        let route = RouteRenderer.makeRoute(
+            positions: routePositions,
+            color: UIColor(hex: train.routeColor),
+            lineWidth: 0.28,
+            opacity: 0.92,
+            railGauge: gauge,
+            railThickness: railThickness
+        )
+        container.addChild(route)
+        contentRoot.addChild(container)
+        routeEntity = container
+    }
+
+    private func makeArrivalVisualization(for train: NearbyTrain) -> Entity {
+        let container = Entity()
+        container.name = "arrival-track"
+        guard let axis = arrivalAxisForward, let anchor = arrivalAnchorPosition else {
+            return container
+        }
+        let vertical = SIMD3<Float>(0, -0.75, 0)
+        let trackStart = anchor + axis * 46 + vertical
+        let trackEnd = anchor - axis * 8 + vertical
+        var crossTrack = simd_cross(SIMD3<Float>(0, 1, 0), axis)
+        if simd_length(crossTrack) < 0.001 {
+            crossTrack = SIMD3<Float>(1, 0, 0)
+        }
+        crossTrack = simd_normalize(crossTrack)
+        for offset: Float in [-0.58, 0.58] {
+            container.addChild(makeSegment(
+                from: trackStart + crossTrack * offset,
+                to: trackEnd + crossTrack * offset,
+                width: 0.11,
+                color: UIColor(white: 0.72, alpha: 0.85)
+            ))
+        }
+        for distance in stride(from: Float(-6), through: 44, by: 3.0) {
+            let center = anchor + axis * distance + vertical
+            container.addChild(makeSegment(
+                from: center - crossTrack * 0.82,
+                to: center + crossTrack * 0.82,
+                width: 0.09,
+                color: UIColor(white: 0.25, alpha: 0.8)
+            ))
+        }
+
+        if let lower = train.lowerChainageMeters,
+           let upper = train.upperChainageMeters,
+           let nextStop = train.nextStopChainageMeters {
+            let far = arrivalVisualDistance(
+                physicalMeters: max(0, nextStop - lower)
+            )
+            let near = arrivalVisualDistance(
+                physicalMeters: max(0, nextStop - upper)
+            )
+            container.addChild(makeSegment(
+                from: anchor + axis * far + SIMD3<Float>(0, -0.75, 0),
+                to: anchor + axis * near + SIMD3<Float>(0, -0.75, 0),
+                width: 2.8,
+                color: UIColor(hex: train.routeColor).withAlphaComponent(0.24)
+            ))
+        }
+        return container
+    }
+
+    private func makeSegment(
+        from start: SIMD3<Float>,
+        to end: SIMD3<Float>,
+        width: Float,
+        color: UIColor
+    ) -> ModelEntity {
+        let delta = end - start
+        let rawLength = simd_length(delta)
+        let length = max(rawLength, 0.05)
+        let segment = ModelEntity(
+            mesh: .generateBox(
+                size: SIMD3(width, length, width),
+                cornerRadius: min(width / 2, 0.4)
+            ),
+            materials: [SimpleMaterial(
+                color: color,
+                roughness: 0.35,
+                isMetallic: false
+            )]
+        )
+        segment.position = (start + end) / 2
+        if rawLength > 0.001 {
+            segment.orientation = simd_quatf(
+                from: SIMD3<Float>(0, 1, 0),
+                to: simd_normalize(delta)
+            )
+        }
+        return segment
+    }
+
+    private func displayPosition(
+        for point: GeoPoint,
+        depth: Double,
+        targetAltitudeMeters: Double?
+    ) -> SIMD3<Float> {
+        let target = CLLocationCoordinate2D(
+            latitude: point.latitude,
+            longitude: point.longitude
+        )
+        // Keep the AR scene tied to the session's initial location. Using each
+        // noisy GPS fix as a new origin made stationary trains jump forward and
+        // backward inside high-rise buildings.
+        let reference = origin ?? currentCoordinate ?? target
+        return GeoCoordinateConverter.displayARPosition(
+            origin: reference,
+            target: target,
+            depthMeters: effectiveVerticalDropMeters(
+                tunnelDepth: depth,
+                targetAltitudeMeters: targetAltitudeMeters
+            )
+        )
+    }
+
+    private func cameraBearingDegrees(from transform: simd_float4x4) -> Double? {
+        let forward = SIMD2<Float>(-transform.columns.2.x, -transform.columns.2.z)
+        guard simd_length(forward) > 0.001 else { return nil }
+        return normalizedDegrees(
+            atan2(Double(forward.x), Double(-forward.y)) * 180 / .pi
+        )
+    }
+
+    private func updateAltitude(
+        from location: CLLocation,
+        relativeAltitudeMeters: Double?
+    ) {
+        if let relativeAltitudeMeters, let altitudeReferenceMeters {
+            currentAltitudeMeters = altitudeReferenceMeters + relativeAltitudeMeters
+            return
+        }
+        guard location.verticalAccuracy >= 0, location.verticalAccuracy <= 50 else {
+            return
+        }
+        currentAltitudeMeters = location.altitude
+        if let relativeAltitudeMeters {
+            altitudeReferenceMeters = location.altitude - relativeAltitudeMeters
+        }
+    }
+
+    private func effectiveVerticalDropMeters(
+        tunnelDepth: Double,
+        targetAltitudeMeters: Double?
+    ) -> Double {
+        if displayMode == .arrival {
+            // Arrival View is station-centric and uses its manually aligned
+            // local track axis rather than approximate tunnel altitude.
+            return 0.35
+        }
+        guard let altitude = currentAltitudeMeters else { return tunnelDepth }
+        if let targetAltitudeMeters {
+            return max(tunnelDepth, altitude - targetAltitudeMeters)
+        }
+        // CLLocation altitude is relative to mean sea level. For this prototype,
+        // the Manhattan surface is treated as approximately sea level.
+        return max(tunnelDepth, altitude + tunnelDepth)
+    }
+
+    private func normalizedDegrees(_ degrees: Double) -> Double {
+        let value = degrees.truncatingRemainder(dividingBy: 360)
+        return value >= 0 ? value : value + 360
+    }
+
+    @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
+        let location = recognizer.location(in: arView)
+        var entity = arView.entity(at: location)
+        while let current = entity {
+            if current.name.hasPrefix("train:") {
+                onTrainSelected?(String(current.name.dropFirst("train:".count)))
+                return
+            }
+            entity = current.parent
+        }
+        onTrainSelected?(nil)
+    }
+
+    private func updateIndicator() {
+        updateTrackingDescription()
+        if let frame = arView.session.currentFrame,
+           let bearing = cameraBearingDegrees(from: frame.camera.transform) {
+            let absoluteBearing = normalizedDegrees(bearing)
+            if viewHeadingDegrees.map({
+                abs(HeadingEstimator.signedDeltaDegrees(
+                    from: $0,
+                    to: absoluteBearing
+                )) >= 0.25
+            }) ?? true {
+                viewHeadingDegrees = absoluteBearing
+            }
+            onCameraOrientationSample?(bearing, frame.timestamp)
+        }
+        guard let selectedID,
+              let train = latestTrains[selectedID],
+              let marker = markers[selectedID],
+              let frame = arView.session.currentFrame
+        else {
+            edgeIndicator = EdgeIndicatorState()
+            return
+        }
+        let worldPosition = marker.position(relativeTo: nil)
+        let cameraTransform = frame.camera.transform
+        let cameraSpace = cameraTransform.inverse
+            * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
+        let projected = arView.project(worldPosition)
+        let bounds = arView.bounds.insetBy(dx: 30, dy: 60)
+        let isInFront = cameraSpace.z < 0
+        if isInFront, let projected, bounds.contains(projected) {
+            edgeIndicator = EdgeIndicatorState()
+            return
+        }
+        var x = Double(cameraSpace.x)
+        var y = Double(-cameraSpace.y)
+        if !isInFront {
+            x = -x
+            y = -y
+        }
+        if abs(x) + abs(y) < 0.001 {
+            y = -1
+        }
+        edgeIndicator = EdgeIndicatorState(
+            isVisible: true,
+            angleRadians: atan2(y, x) + .pi / 2,
+            line: train.line,
+            color: train.routeColor
+        )
+    }
+
+    private func updateTrackingDescription() {
+        guard let frame = arView.session.currentFrame else { return }
+        switch frame.camera.trackingState {
+        case .normal:
+            switch streetLocalizationMode {
+            case .visuallyLocalized:
+                trackingDescription = "Apple visual geolocation locked"
+            case .cinematicDemo:
+                trackingDescription = "Cinematic demo — simulated route"
+            case .visualLocalizing, .checkingAvailability:
+                trackingDescription = "Matching the camera view to Apple Maps"
+            case .unavailable:
+                trackingDescription = "Outdoor visual positioning unavailable"
+            }
+        case .notAvailable:
+            trackingDescription = "AR tracking unavailable"
+        case let .limited(reason):
+            trackingDescription = "AR tracking limited: \(reason)"
+        }
+    }
+}
