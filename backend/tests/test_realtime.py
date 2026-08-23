@@ -76,6 +76,8 @@ def test_parse_and_estimate_train(static_store: StaticGTFSStore) -> None:
     assert train.positionRange
     assert 40.704 < train.position.latitude < 40.706
     assert train.upcomingRoute
+    assert train.routeOverview
+    assert len(train.routeOverview) >= len(train.upcomingRoute)
 
 
 def test_rejects_realtime_reroute_that_conflicts_with_static_shape(

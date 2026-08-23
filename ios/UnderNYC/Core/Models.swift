@@ -53,6 +53,7 @@ struct NearbyTrain: Codable, Identifiable, Equatable, Sendable {
     var shapeValidity: String? = nil
     var degradationReason: String? = nil
     let upcomingRoute: [GeoPoint]
+    var routeOverview: [GeoPoint]? = nil
 }
 
 extension NearbyTrain {

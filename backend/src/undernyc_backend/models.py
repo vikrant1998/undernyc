@@ -55,6 +55,7 @@ class NearbyTrain(BaseModel):
     shapeValidity: str = "matched"
     degradationReason: str | None = None
     upcomingRoute: list[GeoPoint]
+    routeOverview: list[GeoPoint] = Field(default_factory=list)
 
 
 class NearbyResponse(BaseModel):

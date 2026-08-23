@@ -312,6 +312,12 @@ def estimate_train(
     # rendered rails describe different geometry.
     route_end = next_stop.shape_distance_m
     route_points = simplify_path(context.shape, current_distance, route_end)
+    route_overview = simplify_path(
+        context.shape,
+        0.0,
+        context.shape[-1].distance_m,
+        max_points=80,
+    )
     observed_at = datetime.fromtimestamp(observed_epoch, tz=UTC)
     eta_seconds = max(0, next_arrival - now_epoch)
     direction = f"Toward {context.headsign}" if context.headsign else (
@@ -362,6 +368,10 @@ def estimate_train(
         upcomingRoute=[
             GeoPoint(latitude=point[0], longitude=point[1])
             for point in route_points
+        ],
+        routeOverview=[
+            GeoPoint(latitude=point[0], longitude=point[1])
+            for point in route_overview
         ],
     )
 

@@ -7,6 +7,6 @@ __pycache__/
 backend/data/
 backend/.coverage
 ios/DerivedData/
+ios/DerivedData-*/
 ios/*.xcodeproj/xcuserdata/
 *.xcuserstate
-

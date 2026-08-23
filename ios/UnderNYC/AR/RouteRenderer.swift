@@ -115,6 +115,42 @@ enum RouteRenderer {
         return route
     }
 
+    /// Draws one lightweight schematic line for a train's complete route.
+    /// The detailed selected segment still uses the two-rail renderer above.
+    static func makeCenterline(
+        positions: [SIMD3<Float>],
+        color: UIColor,
+        width: Float = 0.055,
+        opacity: CGFloat = 0.30
+    ) -> Entity {
+        let route = Entity()
+        route.name = "route-overview"
+        let material = SimpleMaterial(
+            color: color.withAlphaComponent(opacity),
+            roughness: 0.45,
+            isMetallic: false
+        )
+        for (start, end) in zip(positions, positions.dropFirst()) {
+            let delta = end - start
+            let length = simd_length(delta)
+            guard length > 0.1 else { continue }
+            let segment = ModelEntity(
+                mesh: .generateBox(
+                    size: SIMD3<Float>(width, length, width),
+                    cornerRadius: width / 2
+                ),
+                materials: [material]
+            )
+            segment.position = (start + end) / 2
+            segment.orientation = simd_quatf(
+                from: SIMD3<Float>(0, 1, 0),
+                to: simd_normalize(delta)
+            )
+            route.addChild(segment)
+        }
+        return route
+    }
+
     /// Samples the exact piecewise-linear geometry that is rendered. Using
     /// this for train motion guarantees that the marker cannot cut across a
     /// curve or drift away because of nonlinear city-distance compression.

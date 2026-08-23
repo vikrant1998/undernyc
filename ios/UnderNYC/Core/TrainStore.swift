@@ -21,6 +21,7 @@ final class TrainStore: ObservableObject {
     private let client: APIClient
     private var demoStartedAt = Date()
     private var demoCycle = 0
+    private var hasAppliedDefaultLiveLine = false
 
     init(client: APIClient = APIClient()) {
         self.client = client
@@ -70,6 +71,12 @@ final class TrainStore: ObservableObject {
             allNearbyTrains = Array(
                 response.trains.prefix(AppConfiguration.maximumVisibleTrains)
             )
+            if !hasAppliedDefaultLiveLine {
+                hasAppliedDefaultLiveLine = true
+                if allNearbyTrains.contains(where: { $0.line == "1" }) {
+                    selectedLine = "1"
+                }
+            }
             applyFilters(forceNearestSelection: false)
             generatedAt = response.generatedAt
             feedAgeSeconds = response.feedAgeSeconds
@@ -95,6 +102,7 @@ final class TrainStore: ObservableObject {
             clearFilters()
             refreshCinematicDemo(at: coordinate)
         } else {
+            hasAppliedDefaultLiveLine = false
             allNearbyTrains = []
             trains = []
             selectedTrainID = nil
@@ -305,7 +313,8 @@ final class TrainStore: ObservableObject {
             positionRange: [start],
             shapeValidity: "matched",
             degradationReason: nil,
-            upcomingRoute: route
+            upcomingRoute: route,
+            routeOverview: [start] + route
         )
     }
 

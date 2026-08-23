@@ -78,6 +78,8 @@ final class ARSceneController: NSObject, ObservableObject {
     private var markerSegmentIDs: [String: String] = [:]
     private var visualProgress: [String: VisualProgress] = [:]
     private var projectedMarkerPaths: [String: [SIMD3<Float>]] = [:]
+    private var overviewRouteEntities: [String: Entity] = [:]
+    private var overviewRouteSignatures: [String: String] = [:]
     private var latestTrains: [String: NearbyTrain] = [:]
     private var selectedID: String?
     private var routeEntity: Entity?
@@ -234,6 +236,8 @@ final class ARSceneController: NSObject, ObservableObject {
         markerSegmentIDs.removeAll()
         visualProgress.removeAll()
         projectedMarkerPaths.removeAll()
+        overviewRouteEntities.removeAll()
+        overviewRouteSignatures.removeAll()
         contentRoot.children.removeAll()
         routeEntity = nil
         clearArrivalAlignment()
@@ -405,6 +409,18 @@ final class ARSceneController: NSObject, ObservableObject {
             visualProgress[id] = nil
             projectedMarkerPaths[id] = nil
         }
+        for (id, entity) in overviewRouteEntities where !activeIDs.contains(id) {
+            entity.removeFromParent()
+            overviewRouteEntities[id] = nil
+            overviewRouteSignatures[id] = nil
+        }
+        if displayMode != .street {
+            for entity in overviewRouteEntities.values {
+                entity.removeFromParent()
+            }
+            overviewRouteEntities.removeAll()
+            overviewRouteSignatures.removeAll()
+        }
 
         for train in renderTrains {
             updateVisualProgress(for: train)
@@ -462,9 +478,50 @@ final class ARSceneController: NSObject, ObservableObject {
                 distanceMeters: geographicDistance
             )
             updateMarkerOrientation(for: train, entity: entity)
+            if displayMode == .street {
+                updateOverviewRoute(for: train, origin: origin)
+            }
         }
         redrawSelectedRoute(origin: origin)
         updateIndicator()
+    }
+
+    private func updateOverviewRoute(
+        for train: NearbyTrain,
+        origin: CLLocationCoordinate2D
+    ) {
+        let isSelected = train.id == selectedID
+        let overviewPoints = train.routeOverview ?? []
+        let signature = [
+            train.routeShapeId ?? train.id,
+            String(overviewPoints.count),
+            isSelected ? "selected" : "context",
+        ].joined(separator: ":")
+        guard overviewRouteSignatures[train.id] != signature else { return }
+        overviewRouteEntities[train.id]?.removeFromParent()
+
+        let positions: [SIMD3<Float>]
+        if train.positionMethod == "cinematic_demo" {
+            positions = projectedMarkerPaths[train.id] ?? []
+        } else {
+            positions = RouteRenderer.projectedPositions(
+                points: overviewPoints,
+                origin: origin,
+                depthMeters: effectiveVerticalDropMeters(
+                    tunnelDepth: train.approximateDepthMeters,
+                    targetAltitudeMeters: train.estimatedAltitudeMeters
+                )
+            )
+        }
+        let line = RouteRenderer.makeCenterline(
+            positions: positions,
+            color: UIColor(hex: train.routeColor),
+            width: isSelected ? 0.085 : 0.04,
+            opacity: isSelected ? 0.62 : 0.22
+        )
+        contentRoot.addChild(line)
+        overviewRouteEntities[train.id] = line
+        overviewRouteSignatures[train.id] = signature
     }
 
     func updateHeadingEstimate(_ estimate: HeadingEstimate) {

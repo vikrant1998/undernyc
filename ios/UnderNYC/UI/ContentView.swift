@@ -39,7 +39,9 @@ struct ContentView: View {
                 HeaderView(
                     store: trainStore,
                     showDiagnostics: $showDiagnostics,
-                    showFilters: $showTrainFilters
+                    showFilters: $showTrainFilters,
+                    cinematicDemoEnabled: cinematicDemoEnabled,
+                    toggleDemo: { setCinematicDemo(!cinematicDemoEnabled) }
                 )
                 if displayMode == .street {
                     streetLocalizationStatus
@@ -343,6 +345,8 @@ private struct HeaderView: View {
     @ObservedObject var store: TrainStore
     @Binding var showDiagnostics: Bool
     @Binding var showFilters: Bool
+    let cinematicDemoEnabled: Bool
+    let toggleDemo: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
@@ -360,6 +364,24 @@ private struct HeaderView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button(action: toggleDemo) {
+                Label(
+                    cinematicDemoEnabled ? "Live" : "Demo",
+                    systemImage: cinematicDemoEnabled
+                        ? "dot.radiowaves.left.and.right"
+                        : "film"
+                )
+                .font(.caption.bold())
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .background(.thinMaterial, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                cinematicDemoEnabled
+                    ? "Switch to live trains"
+                    : "Switch to cinematic demo"
+            )
             Button {
                 showFilters = true
             } label: {
