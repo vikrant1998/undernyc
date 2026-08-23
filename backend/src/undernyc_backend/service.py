@@ -26,14 +26,11 @@ class TransitService:
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
-        await asyncio.to_thread(self.static.ensure_ready)
-        try:
-            self.snapshot = await self.realtime.fetch_snapshot()
-            self.last_error = None
-        except Exception as error:
-            self.last_error = str(error)
         self._stop.clear()
-        self._task = asyncio.create_task(self._poll_loop(), name="mta-realtime-poller")
+        if self._task is None:
+            self._task = asyncio.create_task(
+                self._initialize_and_poll(), name="mta-transit-service"
+            )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -45,7 +42,32 @@ class TransitService:
                 pass
             self._task = None
 
-    async def _poll_loop(self) -> None:
+    async def _initialize_and_poll(self) -> None:
+        # Building the static GTFS index can take several minutes on a cold,
+        # small cloud instance. Keep it off the ASGI startup path so the web
+        # server can bind immediately and expose an honest `starting` health
+        # response while initialization proceeds.
+        while not self._stop.is_set() and not self.static.ready:
+            try:
+                await asyncio.to_thread(self.static.ensure_ready)
+                self.last_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.last_error = str(error)
+                await asyncio.sleep(self.settings.poll_interval_seconds)
+
+        if self._stop.is_set():
+            return
+
+        try:
+            self.snapshot = await self.realtime.fetch_snapshot()
+            self.last_error = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.last_error = str(error)
+
         next_static_refresh = asyncio.get_running_loop().time() + self.settings.static_refresh_seconds
         while not self._stop.is_set():
             try:

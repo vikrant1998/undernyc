@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 from undernyc_backend.config import Settings
@@ -43,3 +44,29 @@ def test_nearby_filters_and_sorts(tmp_path) -> None:
     response = service.nearby(40.7, -74, 1000, 15)
     assert [train.id for train in response.trains] == ["near"]
 
+
+def test_start_does_not_wait_for_static_gtfs_build(tmp_path) -> None:
+    async def exercise() -> None:
+        settings = Settings(data_dir=tmp_path)
+        service = TransitService(settings)
+        build_started = asyncio.Event()
+        release_build = asyncio.Event()
+
+        def slow_build() -> None:
+            build_started_loop.call_soon_threadsafe(build_started.set)
+            asyncio.run_coroutine_threadsafe(
+                release_build.wait(), build_started_loop
+            ).result(timeout=1)
+
+        service.static.ensure_ready = slow_build  # type: ignore[method-assign]
+        await asyncio.wait_for(service.start(), timeout=0.1)
+        await asyncio.wait_for(build_started.wait(), timeout=0.5)
+        assert service.health().status == "starting"
+        release_build.set()
+        await service.stop()
+
+    build_started_loop = asyncio.new_event_loop()
+    try:
+        build_started_loop.run_until_complete(exercise())
+    finally:
+        build_started_loop.close()
