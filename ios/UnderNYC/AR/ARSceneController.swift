@@ -409,10 +409,18 @@ final class ARSceneController: NSObject, ObservableObject {
         for train in renderTrains {
             updateVisualProgress(for: train)
             if displayMode == .street {
-                projectedMarkerPaths[train.id] = projectedStreetPath(
-                    for: train,
-                    origin: origin
-                )
+                if train.positionMethod == "cinematic_demo" {
+                    if projectedMarkerPaths[train.id] == nil {
+                        projectedMarkerPaths[train.id] = cinematicDemoPath(
+                            for: train
+                        )
+                    }
+                } else {
+                    projectedMarkerPaths[train.id] = projectedStreetPath(
+                        for: train,
+                        origin: origin
+                    )
+                }
             } else {
                 projectedMarkerPaths[train.id] = nil
             }
@@ -640,6 +648,56 @@ final class ARSceneController: NSObject, ObservableObject {
                 targetAltitudeMeters: train.estimatedAltitudeMeters
             )
         )
+    }
+
+    /// The demo is intentionally a local AR spectacle, not a compressed map.
+    /// A life-size rigid consist is longer than the former city-scale route,
+    /// so moving it around that short nonlinear curve caused large swings and
+    /// apparent spins. Anchor one long, nearly straight track to the camera at
+    /// demo start and never recompute it as the user moves.
+    private func cinematicDemoPath(for train: NearbyTrain) -> [SIMD3<Float>] {
+        guard let frame = arView.session.currentFrame else {
+            let y: Float = -14
+            return stride(from: Float(0), through: 190, by: 10).map {
+                SIMD3<Float>(0, y, -$0)
+            }
+        }
+        let transform = frame.camera.transform
+        let camera = SIMD3<Float>(
+            transform.columns.3.x,
+            transform.columns.3.y,
+            transform.columns.3.z
+        )
+        var forward = SIMD3<Float>(
+            -transform.columns.2.x,
+            0,
+            -transform.columns.2.z
+        )
+        if simd_length(forward) < 0.001 {
+            forward = SIMD3<Float>(0, 0, -1)
+        } else {
+            forward = simd_normalize(forward)
+        }
+        var right = simd_cross(forward, SIMD3<Float>(0, 1, 0))
+        if simd_length(right) < 0.001 {
+            right = SIMD3<Float>(1, 0, 0)
+        } else {
+            right = simd_normalize(right)
+        }
+
+        let isSecondTrain = train.line == "D2"
+        let lateral: Float = isSecondTrain ? 22 : 0
+        let startForward: Float = isSecondTrain ? 35 : -15
+        let length: Float = isSecondTrain ? 210 : 190
+        let direction = isSecondTrain
+            ? simd_normalize(forward + right * 0.16)
+            : forward
+        let start = SIMD3<Float>(camera.x, camera.y - 14, camera.z)
+            + forward * startForward
+            + right * lateral
+        return stride(from: Float(0), through: length, by: 10).map {
+            start + direction * $0
+        }
     }
 
     private func advanceMarkers() {
