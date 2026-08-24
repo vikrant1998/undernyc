@@ -2,15 +2,19 @@ import RealityKit
 import UIKit
 
 /// Builds a lightweight, full-consist subway train from RealityKit primitives.
-/// Dimensions are in metres. At close range the model is approximately the
-/// size of a six-car demo consist; geographic distance controls LOD.
+/// Dimensions are in metres. The detailed model represents a ten-car
+/// A-Division consist like the numbered-line trains used by the default demo.
+/// Geographic distance controls LOD for non-demo trains.
 @MainActor
 enum TrainEntityFactory {
-    private static let carCount = 6
-    private static let carLength: Float = 13.4
-    private static let carGap: Float = 0.45
-    private static let carWidth: Float = 2.8
-    private static let carHeight: Float = 3.2
+    // MTA A-Division cars are 51 ft long and operate as ten-car consists.
+    // Width/height approximate the R62/R62A envelope. The small visual gap is
+    // the coupler space between adjacent procedural car bodies.
+    private static let carCount = 10
+    private static let carLength: Float = 15.54
+    private static let carGap: Float = 0.15
+    private static let carWidth: Float = 2.67
+    private static let carHeight: Float = 3.62
 
     static func makeMarker(
         for train: NearbyTrain,

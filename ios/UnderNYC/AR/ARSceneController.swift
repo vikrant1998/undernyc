@@ -743,12 +743,17 @@ final class ARSceneController: NSObject, ObservableObject {
         }
 
         let isSecondTrain = train.line == "D2"
-        let lateral: Float = isSecondTrain ? 22 : 0
-        let startForward: Float = isSecondTrain ? 35 : -15
-        let length: Float = isSecondTrain ? 210 : 190
+        let lateral: Float = isSecondTrain ? 28 : 0
+        // A ten-car A-Division consist is about 157 m including coupler gaps.
+        // Begin with its nearest end still tens of metres in front of the
+        // viewer, then bring it toward and past the camera. Previously its
+        // center began only 15 m away, placing half the train through/behind
+        // the viewer and making its apparent scale look absurd.
+        let startForward: Float = isSecondTrain ? 145 : 115
+        let length: Float = isSecondTrain ? 250 : 230
         let direction = isSecondTrain
-            ? simd_normalize(forward + right * 0.16)
-            : forward
+            ? simd_normalize(-forward + right * 0.12)
+            : -forward
         let start = SIMD3<Float>(camera.x, camera.y - 14, camera.z)
             + forward * startForward
             + right * lateral
