@@ -29,8 +29,8 @@ class Settings:
     realtime_feed_urls: tuple[str, ...] = field(
         default_factory=lambda: DEFAULT_REALTIME_FEEDS
     )
-    poll_interval_seconds: float = 15.0
-    static_refresh_seconds: float = 3600.0
+    poll_interval_seconds: float = 30.0
+    static_refresh_seconds: float = 21_600.0
     realtime_stale_seconds: float = 120.0
     snapshot_retention_seconds: float = 90.0
     default_radius_m: float = 2500.0
@@ -60,10 +60,10 @@ class Settings:
             if feeds
             else DEFAULT_REALTIME_FEEDS,
             poll_interval_seconds=float(
-                os.getenv("UNDERNYC_POLL_INTERVAL_SECONDS", "15")
+                os.getenv("UNDERNYC_POLL_INTERVAL_SECONDS", "30")
             ),
             static_refresh_seconds=float(
-                os.getenv("UNDERNYC_STATIC_REFRESH_SECONDS", "3600")
+                os.getenv("UNDERNYC_STATIC_REFRESH_SECONDS", "21600")
             ),
             realtime_stale_seconds=float(
                 os.getenv("UNDERNYC_REALTIME_STALE_SECONDS", "120")
@@ -78,4 +78,3 @@ class Settings:
                 part.strip() for part in origins.split(",") if part.strip()
             ),
         )
-

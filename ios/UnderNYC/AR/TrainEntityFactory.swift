@@ -114,10 +114,8 @@ enum TrainEntityFactory {
         return root
     }
 
-    /// Full physical scale nearby, then exactly the uniform scale implied by
-    /// the city-overview distance compression. An independently tuned LOD
-    /// scale made trains appear progressively larger than their displayed
-    /// distance and was especially misleading beyond a few hundred metres.
+    /// Literal physical scale. Perspective supplies the apparent distance
+    /// scaling, so a train does not change physical dimensions as it moves.
     static func displayScale(distanceMeters: Float) -> Float {
         GeoCoordinateConverter.uniformDisplayScale(
             for: Double(max(0, distanceMeters))
@@ -140,7 +138,7 @@ enum TrainEntityFactory {
         distanceMeters: Float,
         lifeSized: Bool = false
     ) -> Float {
-        max(0.18, 1.435 * visualScale(
+        max(0.015, 1.435 * visualScale(
             selected: selected,
             showDetailedModel: showDetailedModel,
             distanceMeters: distanceMeters,
@@ -154,7 +152,7 @@ enum TrainEntityFactory {
         distanceMeters: Float,
         lifeSized: Bool = false
     ) -> Float {
-        max(0.028, 0.11 * visualScale(
+        max(0.004, 0.11 * visualScale(
             selected: selected,
             showDetailedModel: showDetailedModel,
             distanceMeters: distanceMeters,

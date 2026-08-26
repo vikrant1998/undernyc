@@ -17,11 +17,13 @@ final class TrainStore: ObservableObject {
     @Published private(set) var selectedStation: String?
     @Published private(set) var arrivalsOnly = false
     @Published private(set) var isCinematicDemoEnabled = false
+    @Published private(set) var lastRefreshError: String?
 
     private let client: APIClient
     private var demoStartedAt = Date()
     private var demoCycle = 0
     private var hasAppliedDefaultLiveLine = false
+    private var refreshSerial = 0
 
     init(client: APIClient = APIClient()) {
         self.client = client
@@ -65,9 +67,14 @@ final class TrainStore: ObservableObject {
             refreshCinematicDemo(at: coordinate)
             return
         }
+        refreshSerial += 1
+        let requestSerial = refreshSerial
         if trains.isEmpty { loadingState = .loading }
         do {
             let response = try await client.nearby(location: coordinate)
+            guard requestSerial == refreshSerial, !isCinematicDemoEnabled else {
+                return
+            }
             allNearbyTrains = Array(
                 response.trains.prefix(AppConfiguration.maximumVisibleTrains)
             )
@@ -80,9 +87,25 @@ final class TrainStore: ObservableObject {
             applyFilters(forceNearestSelection: false)
             generatedAt = response.generatedAt
             feedAgeSeconds = response.feedAgeSeconds
+            lastRefreshError = nil
             loadingState = trains.isEmpty ? .empty : .ready
         } catch {
-            loadingState = .failed(error.localizedDescription)
+            guard requestSerial == refreshSerial, !isCinematicDemoEnabled else {
+                return
+            }
+            lastRefreshError = error.localizedDescription
+            // A temporary host wake-up or network failure must not erase a
+            // valid visualization. Keep animating the timestamped last-known
+            // snapshot and surface the problem in diagnostics.
+            if allNearbyTrains.isEmpty
+                || allNearbyTrains.allSatisfy({ $0.validUntil <= .now }) {
+                allNearbyTrains = []
+                trains = []
+                selectedTrainID = nil
+                loadingState = .failed(error.localizedDescription)
+            } else {
+                loadingState = .ready
+            }
         }
     }
 
@@ -95,6 +118,8 @@ final class TrainStore: ObservableObject {
         at coordinate: CLLocationCoordinate2D
     ) {
         guard isCinematicDemoEnabled != enabled else { return }
+        // Invalidate any HTTP response that was started under the old mode.
+        refreshSerial += 1
         isCinematicDemoEnabled = enabled
         if enabled {
             demoStartedAt = .now
@@ -107,6 +132,7 @@ final class TrainStore: ObservableObject {
             trains = []
             selectedTrainID = nil
             loadingState = .loading
+            lastRefreshError = nil
         }
     }
 

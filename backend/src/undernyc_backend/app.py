@@ -3,7 +3,10 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .models import HealthResponse, NearbyResponse
@@ -29,6 +32,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.transit_service = transit_service
+    app.add_middleware(GZipMiddleware, minimum_size=1_000)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(configured.cors_origins),
@@ -39,6 +43,20 @@ def create_app(
     @app.get("/health", response_model=HealthResponse)
     async def health(request: Request) -> HealthResponse:
         return request.app.state.transit_service.health()
+
+    @app.get(
+        "/ready",
+        response_model=HealthResponse,
+        responses={503: {"model": HealthResponse}},
+    )
+    async def ready(request: Request) -> HealthResponse | JSONResponse:
+        response = request.app.state.transit_service.health()
+        if response.status != "ok":
+            return JSONResponse(
+                status_code=503,
+                content=jsonable_encoder(response),
+            )
+        return response
 
     @app.get("/nearby", response_model=NearbyResponse)
     async def nearby(
@@ -61,4 +79,3 @@ def create_app(
 
 
 app = create_app()
-

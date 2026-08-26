@@ -26,6 +26,7 @@ class RealtimeTrip:
     trip_update: Any | None = None
     vehicle: Any | None = None
     feed_timestamp: int = 0
+    trip_update_timestamp: int = 0
     source_index: int = 0
 
 
@@ -97,6 +98,10 @@ def parse_feed_messages(
             record.feed_timestamp = max(record.feed_timestamp, feed_timestamp)
             if kind == "trip_update":
                 record.trip_update = component
+                record.trip_update_timestamp = max(
+                    record.trip_update_timestamp,
+                    int(component.timestamp or 0),
+                )
             else:
                 record.vehicle = component
     return records
@@ -191,31 +196,40 @@ def estimate_train(
     now: datetime,
     settings: Settings,
 ) -> NearbyTrain | None:
+    now_epoch = int(now.timestamp())
+    vehicle_timestamp = int(
+        realtime.vehicle.timestamp or 0
+    ) if realtime.vehicle is not None else 0
+    vehicle_is_fresh = vehicle_timestamp <= 0 or (
+        -60 <= now_epoch - vehicle_timestamp <= settings.realtime_stale_seconds
+    )
+    effective_vehicle = realtime.vehicle if vehicle_is_fresh else None
     if not _realtime_stops_match_static_route(
-        realtime.trip_update, realtime.vehicle, context
+        realtime.trip_update, effective_vehicle, context
     ):
         return None
-    now_epoch = int(now.timestamp())
     updates = _update_times(realtime.trip_update, context)
     if not updates:
         return None
 
     vehicle_sequence = 0
     vehicle_status = gtfs_realtime_pb2.VehiclePosition.IN_TRANSIT_TO
-    vehicle_timestamp = 0
-    if realtime.vehicle is not None:
-        vehicle_sequence = int(realtime.vehicle.current_stop_sequence or 0)
-        vehicle_status = int(realtime.vehicle.current_status)
-        vehicle_timestamp = int(realtime.vehicle.timestamp or 0)
-    observed_epoch = max(realtime.feed_timestamp, vehicle_timestamp)
+    if effective_vehicle is not None:
+        vehicle_sequence = int(effective_vehicle.current_stop_sequence or 0)
+        vehicle_status = int(effective_vehicle.current_status)
+    observed_epoch = max(
+        realtime.feed_timestamp,
+        realtime.trip_update_timestamp,
+        vehicle_timestamp if vehicle_is_fresh else 0,
+    )
     if observed_epoch <= 0 or now_epoch - observed_epoch > settings.realtime_stale_seconds:
         return None
 
     next_index: int | None = None
     if vehicle_sequence > 0 or (
-        realtime.vehicle is not None and realtime.vehicle.stop_id
+        effective_vehicle is not None and effective_vehicle.stop_id
     ):
-        index = _vehicle_stop_index(context.stops, realtime.vehicle)
+        index = _vehicle_stop_index(context.stops, effective_vehicle)
         if index is not None:
             next_index = index + 1 if vehicle_status == gtfs_realtime_pb2.VehiclePosition.STOPPED_AT else index
     if next_index is None or next_index >= len(context.stops):
@@ -349,7 +363,13 @@ def estimate_train(
         verticalUncertaintyMeters=20.0,
         observedAt=observed_at,
         validUntil=observed_at
-        + timedelta(seconds=max(settings.poll_interval_seconds * 3, 45)),
+        + timedelta(
+            seconds=max(
+                settings.realtime_stale_seconds,
+                settings.poll_interval_seconds * 3,
+                45,
+            )
+        ),
         estimateQuality=quality,
         positionMethod=position_method,
         transitStatus=transit_status,

@@ -78,6 +78,7 @@ class StaticGTFSStore:
         self.refresh_seconds = refresh_seconds
         self._lock = RLock()
         self._trip_cache: dict[tuple[str, str, date], TripContext | None] = {}
+        self._active_service_cache: dict[date, frozenset[str]] = {}
 
     @property
     def ready(self) -> bool:
@@ -101,6 +102,7 @@ class StaticGTFSStore:
             if database_stale:
                 self._build_database()
                 self._trip_cache.clear()
+                self._active_service_cache.clear()
 
     def _download_archive(self) -> None:
         last_error: Exception | None = None
@@ -361,6 +363,10 @@ class StaticGTFSStore:
             )
 
     def active_services(self, service_date: date) -> set[str]:
+        with self._lock:
+            cached = self._active_service_cache.get(service_date)
+            if cached is not None:
+                return set(cached)
         day_key = service_date.strftime("%Y%m%d")
         weekday = service_date.strftime("%A").lower()
         if weekday not in {
@@ -390,6 +396,8 @@ class StaticGTFSStore:
                     active.add(service_id)
                 elif exception_type == 2:
                     active.discard(service_id)
+        with self._lock:
+            self._active_service_cache[service_date] = frozenset(active)
         return active
 
     def trip_context(
@@ -409,6 +417,11 @@ class StaticGTFSStore:
         self, realtime_trip_id: str, route_id: str, service_date: date
     ) -> TripContext | None:
         active = self.active_services(service_date)
+        escaped_trip_id = (
+            realtime_trip_id.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
         with sqlite3.connect(self.database_path) as connection:
             connection.row_factory = sqlite3.Row
             rows = list(
@@ -416,10 +429,12 @@ class StaticGTFSStore:
                     """
                     SELECT t.*, r.short_name, r.color, r.text_color
                     FROM trips t JOIN routes r ON r.route_id=t.route_id
-                    WHERE t.route_id=? AND (t.trip_id=? OR t.trip_id LIKE ?)
+                    WHERE t.route_id=? AND (
+                        t.trip_id=? OR t.trip_id LIKE ? ESCAPE '\\'
+                    )
                     LIMIT 40
                     """,
-                    (route_id, realtime_trip_id, f"%_{realtime_trip_id}"),
+                    (route_id, realtime_trip_id, f"%\\_{escaped_trip_id}"),
                 )
             )
             if not rows:

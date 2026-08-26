@@ -25,9 +25,14 @@
     <key>NSCameraUsageDescription</key>
     <string>UnderNYC uses the camera to place live subway trains beneath the streets in augmented reality.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>UnderNYC uses your location and heading to position nearby subway trains relative to you.</string>
+    <string>UnderNYC uses your precise outdoor location to anchor nearby subway routes in augmented reality.</string>
+    <key>NSLocationTemporaryUsageDescriptionDictionary</key>
+    <dict>
+        <key>PreciseSubwayAR</key>
+        <string>Precise location lets Apple visual geolocation lock subway bearings to the street around you.</string>
+    </dict>
     <key>NSMotionUsageDescription</key>
-    <string>UnderNYC fuses motion sensors with AR tracking to keep underground train directions stable.</string>
+    <string>UnderNYC uses motion sensors to stabilize AR tracking and the locally aligned platform view.</string>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

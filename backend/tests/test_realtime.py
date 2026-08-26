@@ -138,3 +138,26 @@ def test_stopped_train_uses_station_anchor_with_platform_uncertainty(
     assert train.transitStatus == "at_station"
     assert train.degradationReason == "platform_position_unavailable"
     assert train.horizontalUncertaintyMeters == 90
+
+
+def test_stale_vehicle_status_does_not_pin_train_to_old_station(
+    static_store: StaticGTFSStore,
+) -> None:
+    now = datetime(2026, 8, 22, 16, 0, tzinfo=UTC)
+    records = parse_feed_messages([_feed(int(now.timestamp()))], now)
+    realtime = next(iter(records.values()))
+    realtime.vehicle.current_status = (
+        gtfs_realtime_pb2.VehiclePosition.STOPPED_AT
+    )
+    realtime.vehicle.stop_id = "S1"
+    realtime.vehicle.timestamp = int(now.timestamp()) - 600
+    context = static_store.trip_context(
+        realtime.trip_id, realtime.route_id, date(2026, 8, 22)
+    )
+    assert context is not None
+    train = estimate_train(
+        realtime, context, now, Settings(data_dir=static_store.data_dir)
+    )
+    assert train is not None
+    assert train.transitStatus == "between_stations"
+    assert train.nextStation == "Second"

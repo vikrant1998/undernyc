@@ -10,7 +10,7 @@ struct ContentView: View {
     @State private var showDiagnostics = false
     @State private var displayMode: ARDisplayMode = .street
     @State private var showTrainFilters = false
-    @State private var cinematicDemoEnabled = true
+    @State private var cinematicDemoEnabled = false
 
     var body: some View {
         ZStack {
@@ -53,26 +53,26 @@ struct ContentView: View {
                 statusOverlay
                 if let selected = trainStore.selectedTrain {
                     TrainInfoCard(train: selected) {
-                        trainStore.select(nil)
+                        showTrainFilters = true
                     }
                 } else {
-                    Text("Tap a glowing train to follow it")
-                        .font(.footnote.weight(.medium))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(.ultraThinMaterial, in: Capsule())
+                    Button {
+                        showTrainFilters = true
+                    } label: {
+                        Label("Choose a train", systemImage: "tram.fill")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .padding()
 
             if displayMode == .street,
-               sceneController.edgeIndicator.isVisible,
-               let direction = compassDirection {
-                CompassArrow(
-                    line: direction.train.line,
-                    color: direction.train.routeColor,
-                    deltaDegrees: direction.delta
-                )
+               sceneController.edgeIndicator.isVisible {
+                EdgeArrow(state: sceneController.edgeIndicator)
                     .allowsHitTesting(false)
             }
         }
@@ -126,7 +126,6 @@ struct ContentView: View {
         .sheet(isPresented: $showTrainFilters) {
             TrainDiscoveryPanel(
                 store: trainStore,
-                displayMode: $displayMode,
                 onCollapse: { showTrainFilters = false }
             )
             .padding()
@@ -152,7 +151,15 @@ struct ContentView: View {
     private var statusOverlay: some View {
         switch trainStore.loadingState {
         case .locating:
-            StatusPill(text: "Finding your location and heading", symbol: "location")
+            StatusPill(
+                text: locationService.error
+                    ?? (locationService.needsPreciseLocation
+                        ? "Enable Precise Location for outdoor AR"
+                        : "Finding your outdoor location"),
+                symbol: locationService.error == nil
+                    ? "location"
+                    : "exclamationmark.triangle.fill"
+            )
         case .loading:
             StatusPill(text: "Finding live trains", symbol: "tram.fill")
         case .empty:
@@ -165,7 +172,14 @@ struct ContentView: View {
         case let .failed(message):
             StatusPill(text: message, symbol: "exclamationmark.triangle.fill")
         case .ready:
-            EmptyView()
+            if trainStore.lastRefreshError != nil {
+                StatusPill(
+                    text: "Using the last live update · refresh delayed",
+                    symbol: "wifi.exclamationmark"
+                )
+            } else {
+                EmptyView()
+            }
         }
     }
 
@@ -236,6 +250,32 @@ struct ContentView: View {
                 text: "Choose a train before aligning Arrival View",
                 symbol: "tram.fill"
             )
+        } else if trainStore.selectedStation == nil {
+            VStack(spacing: 8) {
+                Text("Choose the station where you are waiting, then select an approaching train.")
+                    .font(.footnote.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Button("Choose station") { showTrainFilters = true }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        } else if !trainStore.arrivalsOnly
+                    || trainStore.selectedTrain?.nextStation
+                        != trainStore.selectedStation {
+            VStack(spacing: 8) {
+                Text("Platform view needs a train approaching the selected station.")
+                    .font(.footnote.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Button("Show approaching trains") {
+                    trainStore.setArrivalsOnly(true)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         } else if sceneController.arrivalAligned {
             HStack(spacing: 8) {
                 Label("Arrival axis locked", systemImage: "checkmark.circle.fill")
@@ -298,32 +338,11 @@ struct ContentView: View {
                 relativeAltitudeMeters: headingFusion.relativeAltitudeMeters,
                 displayMode: displayMode
             )
-            try? await Task.sleep(for: .seconds(3))
+            let refreshDelay: Duration = trainStore.lastRefreshError == nil
+                ? .seconds(30)
+                : .seconds(3)
+            try? await Task.sleep(for: refreshDelay)
         }
-    }
-
-    private var compassDirection: (train: NearbyTrain, delta: Double)? {
-        guard let train = trainStore.selectedTrain ?? trainStore.trains.first,
-              let location = locationService.location,
-              let heading = effectiveViewHeading
-        else { return nil }
-        let bearing = GeoCoordinateConverter.bearingDegrees(
-            from: location.coordinate,
-            to: CLLocationCoordinate2D(
-                latitude: train.position.latitude,
-                longitude: train.position.longitude
-            )
-        )
-        return (
-            train,
-            GeoCoordinateConverter.signedHeadingDeltaDegrees(
-                from: heading, to: bearing
-            )
-        )
-    }
-
-    private var effectiveViewHeading: Double? {
-        sceneController.viewHeadingDegrees
     }
 
     private func setCinematicDemo(_ enabled: Bool) {
@@ -339,6 +358,22 @@ struct ContentView: View {
             relativeAltitudeMeters: headingFusion.relativeAltitudeMeters,
             displayMode: displayMode
         )
+        if !enabled {
+            // The periodic loop may be sleeping for a full feed interval.
+            // Switching to Live/Platform should fetch immediately rather than
+            // leaving the sheet empty for up to 30 seconds.
+            Task {
+                await trainStore.refresh(at: location.coordinate)
+                sceneController.sync(
+                    trains: trainStore.trains,
+                    selectedID: trainStore.selectedTrainID,
+                    location: location,
+                    headingEstimate: headingFusion.estimate,
+                    relativeAltitudeMeters: headingFusion.relativeAltitudeMeters,
+                    displayMode: displayMode
+                )
+            }
+        }
     }
 }
 
@@ -370,7 +405,12 @@ private struct HeaderView: View {
                 if displayMode == .street && cinematicDemoEnabled {
                     toggleDemo()
                 }
-                displayMode = displayMode == .street ? .arrival : .street
+                if displayMode == .street {
+                    displayMode = .arrival
+                    showFilters = true
+                } else {
+                    displayMode = .street
+                }
             } label: {
                 Label(
                     displayMode == .street ? "Platform" : "Street",
@@ -382,24 +422,26 @@ private struct HeaderView: View {
                 .background(.thinMaterial, in: Capsule())
             }
             .buttonStyle(.plain)
-            Button(action: toggleDemo) {
-                Label(
-                    cinematicDemoEnabled ? "Live" : "Demo",
-                    systemImage: cinematicDemoEnabled
-                        ? "dot.radiowaves.left.and.right"
-                        : "film"
+            if displayMode == .street {
+                Button(action: toggleDemo) {
+                    Label(
+                        cinematicDemoEnabled ? "Live" : "Demo",
+                        systemImage: cinematicDemoEnabled
+                            ? "dot.radiowaves.left.and.right"
+                            : "film"
+                    )
+                    .font(.caption.bold())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                    .background(.thinMaterial, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(
+                    cinematicDemoEnabled
+                        ? "Switch to live trains"
+                        : "Switch to cinematic demo"
                 )
-                .font(.caption.bold())
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
-                .background(.thinMaterial, in: Capsule())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(
-                cinematicDemoEnabled
-                    ? "Switch to live trains"
-                    : "Switch to cinematic demo"
-            )
             Button {
                 showFilters = true
             } label: {
@@ -436,7 +478,6 @@ private struct HeaderView: View {
 
 private struct TrainDiscoveryPanel: View {
     @ObservedObject var store: TrainStore
-    @Binding var displayMode: ARDisplayMode
     let onCollapse: () -> Void
 
     var body: some View {
@@ -516,13 +557,6 @@ private struct TrainDiscoveryPanel: View {
                 }
 
                 Spacer(minLength: 0)
-
-                Picker("AR mode", selection: $displayMode) {
-                    ForEach(ARDisplayMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                .pickerStyle(.menu)
             }
         }
         .padding(.horizontal, 14)

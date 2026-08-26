@@ -4,8 +4,8 @@ import asyncio
 from datetime import UTC, datetime
 
 from .config import Settings
-from .geometry import bearing_degrees, haversine_m
-from .models import GeoPoint, HealthResponse, NearbyResponse, NearbyTrain
+from .geometry import haversine_m
+from .models import HealthResponse, NearbyResponse
 from .realtime import RealtimeClient, RealtimeSnapshot
 from .static_gtfs import StaticGTFSStore
 
@@ -92,7 +92,9 @@ class TransitService:
             if self.snapshot
             else None
         )
-        status = "ok" if self.static.ready and self.snapshot else "starting"
+        status = "starting"
+        if self.static.ready and self.snapshot:
+            status = "ok" if self.snapshot.trains else "degraded"
         if age is not None and age > self.settings.snapshot_retention_seconds:
             status = "stale"
         return HealthResponse(
@@ -101,7 +103,12 @@ class TransitService:
             activeTrainCount=len(self.snapshot.trains) if self.snapshot else 0,
             lastRealtimeUpdate=self.snapshot.generated_at if self.snapshot else None,
             feedAgeSeconds=age,
-            lastError=self.last_error,
+            lastError=self.last_error
+            or (
+                f"{self.snapshot.source_failures} realtime feed(s) unavailable"
+                if self.snapshot and self.snapshot.source_failures
+                else None
+            ),
         )
 
     def nearby(
@@ -115,7 +122,20 @@ class TransitService:
             raise RuntimeError("realtime train data is stale")
         nearby = []
         for original in self.snapshot.trains:
-            train = self._advance_train(original, min(feed_age, 30.0), now)
+            if original.validUntil <= now:
+                continue
+            # Keep the geometric estimate tied to one coherent MTA snapshot.
+            # The iPhone evaluates motion continuously from the timestamped
+            # chainage/ETA model. Advancing geometry here as well caused the
+            # same elapsed time to be applied twice and invalidated the
+            # route-aligned uncertainty interval.
+            train = original.model_copy(
+                update={
+                    "etaSeconds": max(
+                        0, int((original.etaTime - now).total_seconds())
+                    )
+                }
+            )
             distance = haversine_m(
                 latitude,
                 longitude,
@@ -133,93 +153,4 @@ class TransitService:
             searchRadiusMeters=radius_m,
             snapshotRevision=self.snapshot.generated_at.isoformat(),
             trains=nearby[:limit],
-        )
-
-    @staticmethod
-    def _advance_train(
-        train: NearbyTrain, elapsed_seconds: float, now: datetime
-    ) -> NearbyTrain:
-        requested_advance = max(0.0, train.speedMetersPerSecond * elapsed_seconds)
-        if (
-            train.meanChainageMeters is not None
-            and train.nextStopChainageMeters is not None
-        ):
-            requested_advance = min(
-                requested_advance,
-                max(0.0, train.nextStopChainageMeters - train.meanChainageMeters),
-            )
-        remaining = requested_advance
-        current = train.position
-        remaining_path: list[GeoPoint] = []
-        bearing = train.bearingDegrees
-        route = [point for point in train.upcomingRoute if point != current]
-        for index, following in enumerate(route):
-            segment = haversine_m(
-                current.latitude,
-                current.longitude,
-                following.latitude,
-                following.longitude,
-            )
-            if remaining <= segment or segment <= 0:
-                if segment <= 0:
-                    continue
-                fraction = min(remaining / max(segment, 1e-9), 1.0)
-                bearing = bearing_degrees(
-                    current.latitude,
-                    current.longitude,
-                    following.latitude,
-                    following.longitude,
-                )
-                current = GeoPoint(
-                    latitude=current.latitude
-                    + (following.latitude - current.latitude) * fraction,
-                    longitude=current.longitude
-                    + (following.longitude - current.longitude) * fraction,
-                )
-                remaining_path = [current, *route[index:]]
-                # The requested distance was consumed inside this segment.
-                # Leaving `remaining` unchanged moved the coordinate while
-                # reporting zero achieved chainage, causing the iPhone to
-                # apply the same movement a second time.
-                remaining = 0.0
-                break
-            remaining -= segment
-            current = following
-        else:
-            remaining_path = [current]
-        achieved_advance = max(0.0, requested_advance - remaining)
-        chainage_updates: dict[str, float] = {}
-        if train.meanChainageMeters is not None:
-            advanced_mean = train.meanChainageMeters + achieved_advance
-            if train.nextStopChainageMeters is not None:
-                advanced_mean = min(advanced_mean, train.nextStopChainageMeters)
-            chainage_updates["meanChainageMeters"] = advanced_mean
-        if train.lowerChainageMeters is not None:
-            advanced_lower = train.lowerChainageMeters + achieved_advance
-            if "meanChainageMeters" in chainage_updates:
-                advanced_lower = min(
-                    advanced_lower, chainage_updates["meanChainageMeters"]
-                )
-            chainage_updates["lowerChainageMeters"] = advanced_lower
-        if train.upperChainageMeters is not None:
-            advanced_upper = train.upperChainageMeters + achieved_advance
-            if train.nextStopChainageMeters is not None:
-                advanced_upper = min(advanced_upper, train.nextStopChainageMeters)
-            if "meanChainageMeters" in chainage_updates:
-                advanced_upper = max(
-                    advanced_upper, chainage_updates["meanChainageMeters"]
-                )
-            chainage_updates["upperChainageMeters"] = advanced_upper
-        return train.model_copy(
-            update={
-                "position": current,
-                "bearingDegrees": bearing,
-                "etaSeconds": max(0, int((train.etaTime - now).total_seconds())),
-                "upcomingRoute": remaining_path,
-                # The original range geometry is tied to the source snapshot.
-                # Until it is regenerated from the static shape, omitting it
-                # is safer than drawing a visibly stale uncertainty band.
-                "positionRange": [] if achieved_advance > 0 else train.positionRange,
-                **chainage_updates,
-            }
         )

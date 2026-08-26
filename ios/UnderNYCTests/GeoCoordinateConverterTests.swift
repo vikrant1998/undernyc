@@ -49,7 +49,7 @@ final class GeoCoordinateConverterTests: XCTestCase {
         XCTAssertLessThan(predicted.latitude, 40.71)
     }
 
-    func testFarTargetsKeepBearingButRenderInsideCityScaleRange() {
+    func testFarTargetsKeepBearingAndLiteralRange() {
         let origin = CLLocationCoordinate2D(latitude: 40.7272, longitude: -74.0338)
         let target = CLLocationCoordinate2D(latitude: 40.7193, longitude: -74.0069)
         let truePosition = GeoCoordinateConverter.localARPosition(
@@ -61,20 +61,18 @@ final class GeoCoordinateConverterTests: XCTestCase {
         let trueDistance = hypot(truePosition.x, truePosition.z)
         let displayDistance = hypot(displayPosition.x, displayPosition.z)
         XCTAssertGreaterThan(trueDistance, 2_000)
-        XCTAssertLessThan(displayDistance, 80)
+        XCTAssertEqual(displayDistance, trueDistance, accuracy: 0.01)
         XCTAssertEqual(
             truePosition.x / truePosition.z,
             displayPosition.x / displayPosition.z,
             accuracy: 0.001
         )
-        XCTAssertEqual(
-            displayPosition.y / displayDistance,
-            truePosition.y / trueDistance,
-            accuracy: 0.001
-        )
+        // Literal geographic placement keeps the illustrative tunnel depth
+        // independent from horizontal distance.
+        XCTAssertEqual(displayPosition.y, truePosition.y, accuracy: 0.001)
     }
 
-    func testCityScaleCompressionRemainsStrictlyMonotonic() {
+    func testStreetProjectionRemainsStrictlyMonotonic() {
         let origin = CLLocationCoordinate2D(latitude: 40.75, longitude: -73.99)
         let near = GeoCoordinateConverter.displayARPosition(
             origin: origin,
@@ -87,8 +85,19 @@ final class GeoCoordinateConverterTests: XCTestCase {
             depthMeters: 15
         )
         XCTAssertGreaterThan(
-            simd_length(SIMD2(far.x, far.z)),
-            simd_length(SIMD2(near.x, near.z))
+            Double(simd_length(SIMD2(far.x, far.z))),
+            Double(simd_length(SIMD2(near.x, near.z)))
+        )
+        XCTAssertEqual(
+            Double(simd_length(SIMD2(far.x, far.z))),
+            GeoCoordinateConverter.distanceMeters(
+                from: origin,
+                to: CLLocationCoordinate2D(
+                    latitude: 40.759,
+                    longitude: -73.99
+                )
+            ),
+            accuracy: 0.01
         )
     }
 
@@ -145,11 +154,11 @@ final class GeoCoordinateConverterTests: XCTestCase {
     }
 
     @MainActor
-    func testTrainModelUsesPhysicalScaleNearbyAndShrinksAtDistance() {
-        XCTAssertEqual(TrainEntityFactory.displayScale(distanceMeters: 40), 0.34)
-        XCTAssertLessThan(TrainEntityFactory.displayScale(distanceMeters: 500), 0.28)
-        XCTAssertLessThan(TrainEntityFactory.displayScale(distanceMeters: 2_000), 0.18)
-        XCTAssertGreaterThanOrEqual(TrainEntityFactory.displayScale(distanceMeters: 20_000), 0.07)
+    func testTrainModelKeepsPhysicalScaleAtEveryDistance() {
+        XCTAssertEqual(TrainEntityFactory.displayScale(distanceMeters: 40), 1)
+        XCTAssertEqual(TrainEntityFactory.displayScale(distanceMeters: 500), 1)
+        XCTAssertEqual(TrainEntityFactory.displayScale(distanceMeters: 2_000), 1)
+        XCTAssertEqual(TrainEntityFactory.displayScale(distanceMeters: 20_000), 1)
     }
 
     func testDetailedTrainRequiresNarrowMatchedChainageInterval() {

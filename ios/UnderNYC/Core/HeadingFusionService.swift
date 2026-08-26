@@ -24,7 +24,10 @@ final class HeadingFusionService: ObservableObject {
         guard !isStarted else { return }
         isStarted = true
         logger.info("Starting Core Motion heading fusion")
-        motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
+        // Heading fusion is diagnostic now that Street mode is anchored by
+        // ARGeoTracking. Fifteen hertz is ample for diagnostics and avoids a
+        // needless 60 Hz sensor/filter workload beside RealityKit rendering.
+        motionManager.deviceMotionUpdateInterval = 1.0 / 15.0
         let available = CMMotionManager.availableAttitudeReferenceFrames()
         let reference: CMAttitudeReferenceFrame = available.contains(.xTrueNorthZVertical)
             ? .xTrueNorthZVertical

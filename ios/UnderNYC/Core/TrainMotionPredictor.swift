@@ -15,7 +15,10 @@ enum TrainMotionPredictor {
             return route
         }
         guard route.count > 1 else {
-            return route.last == nextStop ? route : route + [nextStop]
+            // A lone point contains no shape geometry on which to project the
+            // station. Appending a raw stop centroid would invent a straight
+            // off-track spur; hold the point until a valid route arrives.
+            return route
         }
 
         let expectedDistance: Double?

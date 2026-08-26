@@ -2,17 +2,17 @@ services:
   - type: web
     name: undernyc-backend
     runtime: docker
+    plan: free
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    healthCheckPath: /health
+    healthCheckPath: /ready
     autoDeploy: true
     envVars:
       - key: UNDERNYC_DATA_DIR
         value: /var/lib/undernyc
       - key: UNDERNYC_POLL_INTERVAL_SECONDS
-        value: "15"
+        value: "30"
       - key: UNDERNYC_STATIC_REFRESH_SECONDS
-        value: "3600"
+        value: "21600"
       - key: UNDERNYC_APPROXIMATE_DEPTH_M
         value: "15"
-

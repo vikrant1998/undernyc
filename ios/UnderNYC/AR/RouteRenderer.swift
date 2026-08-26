@@ -9,7 +9,6 @@ enum RouteRenderer {
         origin: CLLocationCoordinate2D,
         depthMeters: Double,
         color: UIColor,
-        localScale _: Float,
         lineWidth: Float = 0.28,
         opacity: CGFloat = 0.75,
         railGauge: Float = 1.10,
@@ -153,7 +152,7 @@ enum RouteRenderer {
 
     /// Samples the exact piecewise-linear geometry that is rendered. Using
     /// this for train motion guarantees that the marker cannot cut across a
-    /// curve or drift away because of nonlinear city-distance compression.
+    /// curve or drift away from the geometry that is actually displayed.
     static func position(
         along positions: [SIMD3<Float>],
         progress: Double

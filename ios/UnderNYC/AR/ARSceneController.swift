@@ -31,10 +31,58 @@ extension ARSceneController: ARSessionDelegate {
         }
     }
 
+    nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        forwardGeoAnchors(anchors, removed: false)
+    }
+
+    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        forwardGeoAnchors(anchors, removed: false)
+    }
+
+    nonisolated func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        forwardGeoAnchors(anchors, removed: true)
+    }
+
+    nonisolated func sessionWasInterrupted(_ session: ARSession) {
+        Task { @MainActor [weak self] in
+            self?.handleSessionInterruption()
+        }
+    }
+
+    nonisolated func sessionInterruptionEnded(_ session: ARSession) {
+        Task { @MainActor [weak self] in
+            self?.restartCurrentTrackingSession()
+        }
+    }
+
+    nonisolated func session(_ session: ARSession, didFailWithError error: Error) {
+        let message = error.localizedDescription
+        Task { @MainActor [weak self] in
+            self?.handleSessionFailure(message)
+        }
+    }
+
+    nonisolated private func forwardGeoAnchors(
+        _ anchors: [ARAnchor],
+        removed: Bool
+    ) {
+        for anchor in anchors {
+            guard let geo = anchor as? ARGeoAnchor else { continue }
+            Task { @MainActor [weak self] in
+                self?.handleGeoOriginAnchor(
+                    anchor: geo,
+                    removed: removed
+                )
+            }
+        }
+    }
+
 }
 
 @MainActor
 final class ARSceneController: NSObject, ObservableObject {
+    private static let arrivalTrackYOffset: Float = -1.45
+
     private struct VisualProgress {
         let segmentID: String?
         var chainageMeters: Double
@@ -86,11 +134,15 @@ final class ARSceneController: NSObject, ObservableObject {
     private var arrivalAxisForward: SIMD3<Float>?
     private var arrivalAnchorPosition: SIMD3<Float>?
     private var arrivalInitialDistanceMeters: Double?
+    private var arrivalAlignedSegmentID: String?
     private var indicatorTimer: Timer?
     private var isRunning = false
     private var geoAvailabilityCheckInFlight = false
     private var isGeoTrackingSession = false
     private var cinematicDemoEnabled = false
+    private var geoOriginAnchorID: UUID?
+    private var geoOriginTransform: simd_float4x4?
+    private var geoTrackingIsLocalized = false
 
     override init() {
         super.init()
@@ -116,6 +168,12 @@ final class ARSceneController: NSObject, ObservableObject {
             trackingDescription = "AR world tracking is unavailable on this iPhone"
             return
         }
+        // Platform mode owns a separate gravity-only AR session. GPS drift
+        // must never reset or replace that manually aligned local frame.
+        guard displayMode == .street else {
+            currentCoordinate = location.coordinate
+            return
+        }
         if let origin,
            GeoCoordinateConverter.distanceMeters(
                from: origin, to: location.coordinate
@@ -131,10 +189,15 @@ final class ARSceneController: NSObject, ObservableObject {
     }
 
     private func beginBestAvailableStreetSession(at location: CLLocation) {
+        guard displayMode == .street else { return }
         if cinematicDemoEnabled {
             runCinematicDemoSession()
             return
         }
+        // Never leave geometry from the previous session visible while a new
+        // geographic solution is being acquired.
+        root.isEnabled = false
+        edgeIndicator = EdgeIndicatorState()
         guard !geoAvailabilityCheckInFlight else { return }
         guard ARGeoTrackingConfiguration.isSupported else {
             runOutdoorUnavailableSession()
@@ -149,7 +212,8 @@ final class ARSceneController: NSObject, ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.geoAvailabilityCheckInFlight = false
-                guard !self.cinematicDemoEnabled else { return }
+                guard !self.cinematicDemoEnabled,
+                      self.displayMode == .street else { return }
                 if available {
                     self.runGeoTrackingSession()
                 } else {
@@ -220,11 +284,31 @@ final class ARSceneController: NSObject, ObservableObject {
         trackingDescription = "Cinematic demo — simulated route"
     }
 
+    private func runArrivalTrackingSession() {
+        prepareRootForNewSession()
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.worldAlignment = .gravity
+        configuration.environmentTexturing = .automatic
+        arView.session.run(
+            configuration,
+            options: [.resetTracking, .removeExistingAnchors]
+        )
+        arView.scene.addAnchor(root)
+        isRunning = true
+        isGeoTrackingSession = false
+        root.transform.matrix = matrix_identity_float4x4
+        root.isEnabled = false
+        trackingDescription = "Platform tracking ready — align incoming track"
+    }
+
     private func prepareRootForNewSession() {
         root.removeFromParent()
         contentRoot.removeFromParent()
         root = AnchorEntity(world: .zero)
         root.addChild(contentRoot)
+        geoOriginAnchorID = nil
+        geoOriginTransform = nil
+        geoTrackingIsLocalized = false
     }
 
     func reset(at coordinate: CLLocationCoordinate2D) {
@@ -284,6 +368,7 @@ final class ARSceneController: NSObject, ObservableObject {
             arrivalInitialDistanceMeters = nil
         }
         arrivalAligned = true
+        arrivalAlignedSegmentID = latestTrains[selectedID ?? ""]?.segmentId
         root.isEnabled = true
         resyncCurrentScene()
         return true
@@ -299,6 +384,7 @@ final class ARSceneController: NSObject, ObservableObject {
         arrivalAxisForward = nil
         arrivalAnchorPosition = nil
         arrivalInitialDistanceMeters = nil
+        arrivalAlignedSegmentID = nil
         arrivalAligned = false
         if displayMode == .arrival { root.isEnabled = false }
     }
@@ -338,19 +424,106 @@ final class ARSceneController: NSObject, ObservableObject {
         guard isGeoTrackingSession, !cinematicDemoEnabled else { return }
         switch (status.state, status.accuracy) {
         case (.localized, .high), (.localized, .medium):
-            streetLocalizationMode = .visuallyLocalized
-            trackingDescription = "Apple visual geolocation locked"
-            contentRoot.orientation = simd_quatf(
-                angle: 0,
-                axis: SIMD3<Float>(0, 1, 0)
-            )
+            geoTrackingIsLocalized = true
+            installGeoOriginAnchorIfNeeded()
+            if geoOriginTransform == nil {
+                streetLocalizationMode = .visualLocalizing
+                trackingDescription = "Locking subway view to this street"
+                root.isEnabled = false
+            }
         case (.notAvailable, _):
+            geoTrackingIsLocalized = false
             streetLocalizationMode = .unavailable
             trackingDescription = "Outdoor visual positioning unavailable"
             root.isEnabled = false
         default:
+            geoTrackingIsLocalized = false
             streetLocalizationMode = .visualLocalizing
             trackingDescription = "Matching the camera view to Apple Maps"
+            root.isEnabled = false
+            edgeIndicator = EdgeIndicatorState()
+        }
+    }
+
+    private func handleSessionInterruption() {
+        root.isEnabled = false
+        edgeIndicator = EdgeIndicatorState()
+        trackingDescription = "AR paused"
+    }
+
+    private func handleSessionFailure(_ message: String) {
+        root.isEnabled = false
+        edgeIndicator = EdgeIndicatorState()
+        trackingDescription = "AR session failed: \(message)"
+        if displayMode == .street {
+            streetLocalizationMode = .unavailable
+        }
+    }
+
+    private func restartCurrentTrackingSession() {
+        clearArrivalAlignment()
+        isRunning = false
+        geoAvailabilityCheckInFlight = false
+        if displayMode == .arrival {
+            runArrivalTrackingSession()
+            return
+        }
+        guard let coordinate = currentCoordinate else { return }
+        let altitude = currentAltitudeMeters ?? 0
+        beginBestAvailableStreetSession(at: CLLocation(
+            coordinate: coordinate,
+            altitude: altitude,
+            horizontalAccuracy: 20,
+            verticalAccuracy: 50,
+            timestamp: .now
+        ))
+    }
+
+    private func installGeoOriginAnchorIfNeeded() {
+        guard geoOriginAnchorID == nil, let origin else { return }
+        let anchor = ARGeoAnchor(
+            name: "undernyc-session-origin",
+            coordinate: origin
+        )
+        geoOriginAnchorID = anchor.identifier
+        arView.session.add(anchor: anchor)
+    }
+
+    private func handleGeoOriginAnchor(anchor: ARGeoAnchor, removed: Bool) {
+        guard anchor.identifier == geoOriginAnchorID else { return }
+        if removed {
+            geoOriginTransform = nil
+            root.isEnabled = false
+            streetLocalizationMode = .unavailable
+            trackingDescription = "Geographic anchor was lost — retry outdoors"
+            return
+        }
+        guard anchor.isTracked, geoTrackingIsLocalized else {
+            root.isEnabled = false
+            return
+        }
+        let acquiredFirstLock = geoOriginTransform == nil
+        geoOriginTransform = anchor.transform
+        if displayMode == .street, acquiredFirstLock {
+            // Tie RealityKit to the actual geographic ARAnchor. Copying the
+            // transform into an unrelated `.world` AnchorEntity is weaker:
+            // RealityKit owns world-anchor placement and may move it back to
+            // its configured target. The ARAnchor-backed entity follows every
+            // geotracking refinement automatically.
+            root.removeFromParent()
+            contentRoot.removeFromParent()
+            // Target the session anchor by identifier. This API is available
+            // throughout our iOS 17 deployment range; the newer convenience
+            // initializer links against a symbol absent from iOS 17.2.
+            root = AnchorEntity(.anchor(identifier: anchor.identifier))
+            root.addChild(contentRoot)
+            arView.scene.addAnchor(root)
+            root.isEnabled = true
+        }
+        streetLocalizationMode = .visuallyLocalized
+        trackingDescription = "Apple geographic anchor locked"
+        if acquiredFirstLock {
+            resyncCurrentScene()
         }
     }
 
@@ -379,6 +552,28 @@ final class ARSceneController: NSObject, ObservableObject {
         ) {
             clearArrivalAlignment()
         }
+        if previousMode != displayMode {
+            if displayMode == .arrival {
+                runArrivalTrackingSession()
+            } else {
+                isRunning = false
+                geoAvailabilityCheckInFlight = false
+                if cinematicDemoEnabled {
+                    runCinematicDemoSession()
+                } else if let coordinate = currentCoordinate ?? location?.coordinate {
+                    let altitude = location?.altitude ?? currentAltitudeMeters ?? 0
+                    beginBestAvailableStreetSession(at: CLLocation(
+                        coordinate: coordinate,
+                        altitude: altitude,
+                        horizontalAccuracy: location?.horizontalAccuracy ?? 20,
+                        verticalAccuracy: location?.verticalAccuracy ?? 50,
+                        timestamp: .now
+                    ))
+                }
+            }
+        } else if displayMode == .arrival {
+            root.transform.matrix = matrix_identity_float4x4
+        }
         if let location { currentCoordinate = location.coordinate }
         if let location {
             updateAltitude(
@@ -394,6 +589,15 @@ final class ARSceneController: NSObject, ObservableObject {
         guard let origin = self.origin ?? currentCoordinate, isRunning else { return }
         latestTrains = Dictionary(uniqueKeysWithValues: trains.map { ($0.id, $0) })
         self.selectedID = selectedID
+        if displayMode == .arrival,
+           arrivalAligned,
+           let selectedID,
+           arrivalAlignedSegmentID != latestTrains[selectedID]?.segmentId {
+            // An arrival alignment is tied to one station approach. Once the
+            // realtime train advances to another segment, the old platform
+            // axis no longer describes that arrival and must be re-established.
+            clearArrivalAlignment()
+        }
 
         // Street geometry is shown only after ARGeoTracking has established
         // an outdoor visual/geographic lock. There is deliberately no compass
@@ -401,7 +605,7 @@ final class ARSceneController: NSObject, ObservableObject {
         // instead of rendering a convincingly wrong city direction.
         let orientationIsUsable = displayMode == .arrival
             ? arrivalAligned
-            : streetLocalizationMode.isPrecise
+            : streetLocalizationMode.isPrecise && geoOriginTransform != nil
         guard orientationIsUsable else {
             root.isEnabled = false
             edgeIndicator = EdgeIndicatorState()
@@ -410,9 +614,8 @@ final class ARSceneController: NSObject, ObservableObject {
         root.isEnabled = true
 
         // The API response is a discovery set, not twenty simultaneous AR
-        // targets. City compression otherwise packs kilometres of service
-        // into a narrow ring around the viewer and falsely looks like a crowd
-        // of trains under one sidewalk. Render only the actively selected
+        // targets. Rendering every nearby service simultaneously falsely looks
+        // like a crowd of trains under one sidewalk. Render only the selected
         // train; the discovery sheet remains available to switch targets.
         let renderTrains = trains.filter { $0.id == selectedID }
         let activeIDs = Set(renderTrains.map(\.id))
@@ -570,7 +773,7 @@ final class ARSceneController: NSObject, ObservableObject {
                     visualDistance
                         + TrainEntityFactory.physicalConsistLengthMeters / 2
                 )
-                + SIMD3<Float>(0, -0.75, 0)
+                + SIMD3<Float>(0, Self.arrivalTrackYOffset, 0)
         }
         if let path = projectedMarkerPaths[train.id],
            let position = RouteRenderer.position(
@@ -611,6 +814,8 @@ final class ARSceneController: NSObject, ObservableObject {
               let nextStop = train.nextStopChainageMeters
         else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        let remainingETA = max(0, train.etaTime.timeIntervalSinceNow)
+        let mayAdvance = train.transitStatus != "at_station"
         if let previous = visualProgress[train.id],
            previous.segmentID == train.segmentId {
             // Heading/location refreshes often resubmit the identical source
@@ -620,8 +825,8 @@ final class ARSceneController: NSObject, ObservableObject {
             guard isNewSourceInformation else { return }
             let monotonicMean = max(previous.chainage(at: now), incomingMean)
             let remaining = max(0, nextStop - monotonicMean)
-            let speed = train.etaSeconds > 0
-                ? remaining / Double(train.etaSeconds)
+            let speed = mayAdvance && remainingETA > 0
+                ? remaining / remainingETA
                 : 0
             visualProgress[train.id] = VisualProgress(
                 segmentID: train.segmentId,
@@ -634,13 +839,16 @@ final class ARSceneController: NSObject, ObservableObject {
             )
             return
         }
-        let remaining = max(0, nextStop - incomingMean)
+        let effectiveMean = mayAdvance && remainingETA <= 0
+            ? nextStop
+            : incomingMean
+        let remaining = max(0, nextStop - effectiveMean)
         visualProgress[train.id] = VisualProgress(
             segmentID: train.segmentId,
-            chainageMeters: incomingMean,
+            chainageMeters: effectiveMean,
             nextStopChainageMeters: nextStop,
-            speedMetersPerSecond: train.etaSeconds > 0
-                ? remaining / Double(train.etaSeconds)
+            speedMetersPerSecond: mayAdvance && remainingETA > 0
+                ? remaining / remainingETA
                 : 0,
             updatedAt: now,
             sourceObservedAt: train.observedAt,
@@ -842,9 +1050,6 @@ final class ARSceneController: NSObject, ObservableObject {
                     targetAltitudeMeters: train.estimatedAltitudeMeters
                 ),
                 color: UIColor(hex: train.routeColor),
-                localScale: TrainEntityFactory.displayScale(
-                    distanceMeters: Float(train.distanceFromUserMeters)
-                ),
                 lineWidth: TrainEntityFactory.displayedUncertaintyWidth(
                     selected: true,
                     showDetailedModel: true,
@@ -876,7 +1081,7 @@ final class ARSceneController: NSObject, ObservableObject {
         guard let axis = arrivalAxisForward, let anchor = arrivalAnchorPosition else {
             return container
         }
-        let vertical = SIMD3<Float>(0, -0.75, 0)
+        let vertical = SIMD3<Float>(0, Self.arrivalTrackYOffset, 0)
         let trackStart = anchor
             + axis * (115 + TrainEntityFactory.physicalConsistLengthMeters)
             + vertical
@@ -918,8 +1123,8 @@ final class ARSceneController: NSObject, ObservableObject {
                 physicalMeters: max(0, nextStop - upper)
             )
             container.addChild(makeSegment(
-                from: anchor + axis * far + SIMD3<Float>(0, -0.75, 0),
-                to: anchor + axis * near + SIMD3<Float>(0, -0.75, 0),
+                from: anchor + axis * far + vertical,
+                to: anchor + axis * near + vertical,
                 width: 2.8,
                 color: UIColor(hex: train.routeColor).withAlphaComponent(0.24)
             ))
@@ -1014,13 +1219,12 @@ final class ARSceneController: NSObject, ObservableObject {
             // local track axis rather than approximate tunnel altitude.
             return 0.35
         }
-        guard let altitude = currentAltitudeMeters else { return tunnelDepth }
-        if let targetAltitudeMeters {
-            return max(tunnelDepth, altitude - targetAltitudeMeters)
-        }
-        // CLLocation altitude is relative to mean sea level. For this prototype,
-        // the Manhattan surface is treated as approximately sea level.
-        return max(tunnelDepth, altitude + tunnelDepth)
+        // Street content is parented to a ground-level ARGeoAnchor. Its local
+        // y=0 is therefore the mapped surface, not the phone's altitude. Using
+        // the phone altitude here as well double-counted elevation and could
+        // put a nominal 15 m tunnel more than 100 m below a high-floor user.
+        _ = targetAltitudeMeters
+        return tunnelDepth
     }
 
     private func normalizedDegrees(_ degrees: Double) -> Double {
@@ -1038,7 +1242,8 @@ final class ARSceneController: NSObject, ObservableObject {
             }
             entity = current.parent
         }
-        onTrainSelected?(nil)
+        // Empty-space taps should not silently remove the only rendered
+        // target. Selection changes through the train itself or discovery UI.
     }
 
     private func updateIndicator() {
@@ -1068,10 +1273,29 @@ final class ARSceneController: NSObject, ObservableObject {
         let cameraTransform = frame.camera.transform
         let cameraSpace = cameraTransform.inverse
             * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
-        let projected = arView.project(worldPosition)
         let bounds = arView.bounds.insetBy(dx: 30, dy: 60)
+        let visualBounds = marker.visualBounds(relativeTo: nil)
+        let extrema: [SIMD3<Float>] = [
+            worldPosition,
+            SIMD3(visualBounds.min.x, visualBounds.min.y, visualBounds.min.z),
+            SIMD3(visualBounds.min.x, visualBounds.min.y, visualBounds.max.z),
+            SIMD3(visualBounds.min.x, visualBounds.max.y, visualBounds.min.z),
+            SIMD3(visualBounds.min.x, visualBounds.max.y, visualBounds.max.z),
+            SIMD3(visualBounds.max.x, visualBounds.min.y, visualBounds.min.z),
+            SIMD3(visualBounds.max.x, visualBounds.min.y, visualBounds.max.z),
+            SIMD3(visualBounds.max.x, visualBounds.max.y, visualBounds.min.z),
+            SIMD3(visualBounds.max.x, visualBounds.max.y, visualBounds.max.z),
+        ]
+        let anyPartIsVisible = extrema.contains { point in
+            let pointInCamera = cameraTransform.inverse
+                * SIMD4<Float>(point.x, point.y, point.z, 1)
+            guard pointInCamera.z < 0, let projected = arView.project(point) else {
+                return false
+            }
+            return bounds.contains(projected)
+        }
         let isInFront = cameraSpace.z < 0
-        if isInFront, let projected, bounds.contains(projected) {
+        if anyPartIsVisible {
             edgeIndicator = EdgeIndicatorState()
             return
         }
@@ -1096,9 +1320,15 @@ final class ARSceneController: NSObject, ObservableObject {
         guard let frame = arView.session.currentFrame else { return }
         switch frame.camera.trackingState {
         case .normal:
+            if displayMode == .arrival {
+                trackingDescription = arrivalAligned
+                    ? "Platform track axis locked"
+                    : "Platform tracking ready — align incoming track"
+                return
+            }
             switch streetLocalizationMode {
             case .visuallyLocalized:
-                trackingDescription = "Apple visual geolocation locked"
+                trackingDescription = "Apple geographic anchor locked"
             case .cinematicDemo:
                 trackingDescription = "Cinematic demo — simulated route"
             case .visualLocalizing, .checkingAvailability:

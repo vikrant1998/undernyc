@@ -8,8 +8,9 @@ from undernyc_backend.models import HealthResponse, NearbyResponse
 
 
 class FakeService:
-    def __init__(self) -> None:
+    def __init__(self, status: str = "ok") -> None:
         self.request: tuple[float, float, float, int] | None = None
+        self.status = status
 
     async def start(self) -> None:
         return None
@@ -19,8 +20,8 @@ class FakeService:
 
     def health(self) -> HealthResponse:
         return HealthResponse(
-            status="ok",
-            staticReady=True,
+            status=self.status,
+            staticReady=self.status != "starting",
             activeTrainCount=1,
             lastRealtimeUpdate=datetime.now(tz=UTC),
             feedAgeSeconds=1,
@@ -50,3 +51,19 @@ def test_api_clamps_demo_radius_and_limit(tmp_path) -> None:
     assert response.status_code == 200
     assert service.request == (40.758, -73.9855, 5000, 20)
 
+
+def test_readiness_fails_until_train_snapshot_is_usable(tmp_path) -> None:
+    app = create_app(Settings(data_dir=tmp_path), FakeService(status="starting"))  # type: ignore[arg-type]
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json()["status"] == "starting"
+
+
+def test_readiness_accepts_usable_snapshot(tmp_path) -> None:
+    app = create_app(Settings(data_dir=tmp_path), FakeService())  # type: ignore[arg-type]
+    with TestClient(app) as client:
+        response = client.get("/ready")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"

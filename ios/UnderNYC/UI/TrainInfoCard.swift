@@ -5,6 +5,12 @@ struct TrainInfoCard: View {
     let onClose: () -> Void
 
     var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            content(now: context.date)
+        }
+    }
+
+    private func content(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 10) {
                 Text(train.line)
@@ -25,7 +31,7 @@ struct TrainInfoCard: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                Text(etaText)
+                Text(etaText(now: now))
                     .font(.subheadline.bold().monospacedDigit())
                     .padding(.horizontal, 9)
                     .padding(.vertical, 6)
@@ -34,11 +40,12 @@ struct TrainInfoCard: View {
                         in: Capsule()
                     )
                 Button(action: onClose) {
-                    Image(systemName: "xmark.circle.fill")
+                    Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
                         .font(.title3)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Choose another train")
             }
             HStack(spacing: 12) {
                 Label(distanceText, systemImage: "location.fill")
@@ -70,9 +77,10 @@ struct TrainInfoCard: View {
         }
     }
 
-    private var etaText: String {
-        if train.etaSeconds < 60 { return "<1 min" }
-        return "\(max(1, train.etaSeconds / 60)) min"
+    private func etaText(now: Date) -> String {
+        let seconds = max(0, Int(train.etaTime.timeIntervalSince(now)))
+        if seconds < 60 { return "<1 min" }
+        return "\(max(1, seconds / 60)) min"
     }
 
     private var distanceText: String {

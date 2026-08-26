@@ -20,31 +20,20 @@ enum GeoCoordinateConverter {
         return SIMD3(Float(east), Float(-depthMeters), Float(-north))
     }
 
-    /// Keeps the geographic bearing while bringing city-scale targets inside
-    /// RealityKit's dependable rendering range. The UI continues to report
-    /// the unmodified geographic distance.
+    /// Keeps one literal geographic scale: one AR metre is one physical metre.
+    /// Perspective already makes distant trains appear smaller. Compressing
+    /// city distances moved a train away from its real coordinate and made a
+    /// correct MTA estimate look as though it were beneath the wrong block.
     static func displayARPosition(
         origin: CLLocationCoordinate2D,
         target: CLLocationCoordinate2D,
         depthMeters: Double
     ) -> SIMD3<Float> {
-        var position = localARPosition(
+        localARPosition(
             origin: origin,
             target: target,
             depthMeters: depthMeters
         )
-        let horizontalDistance = hypot(Double(position.x), Double(position.z))
-        guard horizontalDistance > 40 else { return position }
-        // Log compression keeps city-scale geometry renderable while staying
-        // strictly monotonic. A former hard 55 m cap collapsed every radial
-        // point beyond ~261 m onto the same location, erasing whole segments.
-        let compressedDistance = displayedHorizontalDistance(
-            for: horizontalDistance
-        )
-        let scale = Float(compressedDistance / horizontalDistance)
-        position.x *= scale
-        position.z *= scale
-        return position
     }
 
     /// Places a target in the persistent AR world using Core Location's true
@@ -84,17 +73,15 @@ enum GeoCoordinateConverter {
         )
     }
 
-    /// Maps a real horizontal distance into the city-overview AR radius.
-    /// Entity dimensions must use `uniformDisplayScale` so their apparent
-    /// angular size remains consistent with this position mapping.
+    /// Retained as a shared scale contract for renderers and tests. Street AR
+    /// is literal scale, so the displayed distance is the physical distance.
     static func displayedHorizontalDistance(for distanceMeters: Double) -> Double {
-        guard distanceMeters > 40 else { return max(0, distanceMeters) }
-        return 40 + 8 * log1p((distanceMeters - 40) / 40)
+        max(0, distanceMeters)
     }
 
     static func uniformDisplayScale(for distanceMeters: Double) -> Float {
-        guard distanceMeters > 40 else { return 1 }
-        return Float(displayedHorizontalDistance(for: distanceMeters) / distanceMeters)
+        _ = distanceMeters
+        return 1
     }
 
     static func bearingDegrees(

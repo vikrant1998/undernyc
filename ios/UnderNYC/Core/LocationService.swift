@@ -10,6 +10,7 @@ final class LocationService: NSObject, ObservableObject, @preconcurrency CLLocat
     @Published private(set) var error: String?
 
     private let manager = CLLocationManager()
+    private var requestedTemporaryPrecision = false
 
     override init() {
         authorization = manager.authorizationStatus
@@ -22,10 +23,15 @@ final class LocationService: NSObject, ObservableObject, @preconcurrency CLLocat
     }
 
     var isLocationReady: Bool {
-        guard let location, location.horizontalAccuracy >= 0,
+        guard manager.accuracyAuthorization == .fullAccuracy,
+              let location, location.horizontalAccuracy >= 0,
               location.horizontalAccuracy <= 100
         else { return false }
         return true
+    }
+
+    var needsPreciseLocation: Bool {
+        manager.accuracyAuthorization == .reducedAccuracy
     }
 
     var isReady: Bool {
@@ -39,14 +45,17 @@ final class LocationService: NSObject, ObservableObject, @preconcurrency CLLocat
     }
 
     func start() {
-        guard CLLocationManager.locationServicesEnabled() else {
-            error = "Location services are disabled."
-            return
-        }
         if authorization == .notDetermined {
             manager.requestWhenInUseAuthorization()
+            return
+        }
+        guard authorization == .authorizedWhenInUse
+                || authorization == .authorizedAlways else {
+            error = "Precise outdoor placement requires location access."
+            return
         }
         manager.startUpdatingLocation()
+        requestTemporaryPrecisionIfNeeded()
         if CLLocationManager.headingAvailable() {
             manager.startUpdatingHeading()
         }
@@ -55,10 +64,29 @@ final class LocationService: NSObject, ObservableObject, @preconcurrency CLLocat
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         authorization = manager.authorizationStatus
         if authorization == .authorizedWhenInUse || authorization == .authorizedAlways {
+            error = nil
             manager.startUpdatingLocation()
-            manager.startUpdatingHeading()
+            requestTemporaryPrecisionIfNeeded()
+            if CLLocationManager.headingAvailable() {
+                manager.startUpdatingHeading()
+            }
         } else if authorization == .denied || authorization == .restricted {
             error = "Camera-relative trains require location and compass access."
+        }
+    }
+
+    private func requestTemporaryPrecisionIfNeeded() {
+        guard manager.accuracyAuthorization == .reducedAccuracy,
+              !requestedTemporaryPrecision else { return }
+        requestedTemporaryPrecision = true
+        manager.requestTemporaryFullAccuracyAuthorization(
+            withPurposeKey: "PreciseSubwayAR"
+        ) { [weak self] error in
+            Task { @MainActor in
+                if let error {
+                    self?.error = error.localizedDescription
+                }
+            }
         }
     }
 

@@ -32,7 +32,9 @@ used for the estimate.
    precise point. Reroutes that cannot be reconciled with the static shape are
    rejected rather than drawn on a false path.
 7. `/nearby` filters and sorts the snapshot by geodesic user distance and
-   carries the source snapshot revision separately from response time.
+   carries the source snapshot revision separately from response time. It does
+   not advance snapshot geometry; the client evaluates the timestamped motion
+   model once, avoiding double extrapolation.
 
 The estimate is intentionally labelled. It is not tunnel telemetry. Vertical
 placement is a visualization convention and is never presented as measured
@@ -40,26 +42,31 @@ tunnel depth.
 
 ## iPhone pipeline
 
-ARKit runs with gravity alignment. Street View fuses outdoor absolute heading
-with ARKit's stable relative pose, then converts each latitude/longitude to a
-compressed local east/north displacement. Arrival View is a different spatial
-contract: the user points down the incoming track once and taps Align, making
-that local track axis authoritative without relying on subway-station magnetic
-north.
+Street mode runs `ARGeoTrackingConfiguration`. After Apple visual geolocation
+reaches medium/high accuracy, the app creates a ground-level `ARGeoAnchor` at
+the session origin. All literal-scale east/north subway geometry is expressed in
+that anchor's east/up/south frame, so GPS/heading is not manually reimplemented
+as an assumed world-zero transform.
 
-RealityKit markers move continuously toward a short-horizon prediction between
-HTTP refreshes. A broad translucent route segment communicates possible
-longitudinal occupancy. A detailed consist is shown only for a selected train
-whose matched interval is narrow enough; otherwise the marker becomes an
-abstract pulse. Arrival View renders one selected train along the aligned local
-axis, approaching a symbolic platform origin. The selected entity is projected
-into screen space to switch between its marker and the edge arrow.
+Platform mode is a different spatial contract and a different AR session. It
+uses gravity-only world tracking; the user selects a station, points down the
+incoming track once, and taps Align. That local track axis remains authoritative
+without relying on indoor magnetic north or outdoor localization imagery.
+
+RealityKit markers move at display rate from route chainage and absolute ETA,
+while backend snapshots refresh at a lower cadence. A broad translucent route
+segment communicates possible longitudinal occupancy. Only the selected train
+is rendered as a detailed consist; its uncertainty remains visible rather than
+being implied away. Platform mode renders that train at physical scale along
+the aligned local axis, approaching a symbolic platform origin. The selected
+entity is projected into screen space to switch mutually exclusively between
+its marker and edge arrow.
 
 ## Demo limits
 
 - A warm backend and a mostly stationary user are assumed.
-- Moving more than 30 metres rebases the AR session.
-- There is no tunnel depth model, LiDAR occlusion, ARGeoAnchor, navigation,
+- Moving more than 150 metres rebases the outdoor AR session.
+- There is no measured tunnel depth model, LiDAR occlusion, navigation,
   persistence, analytics, or user identity.
 - MTA outages and missing trip matches fail by omitting the affected train,
   never by inventing a position.

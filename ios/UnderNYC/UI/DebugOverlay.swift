@@ -36,7 +36,7 @@ struct DebugOverlay: View {
             if let field = headingFusion.magneticFieldMicrotesla {
                 Text(String(format: "Magnetic field %.1f µT", field))
             }
-            if let train = trainStore.trains.first,
+            if let train = trainStore.selectedTrain ?? trainStore.trains.first,
                let location = locationService.location {
                 let bearing = GeoCoordinateConverter.bearingDegrees(
                     from: location.coordinate,
@@ -48,6 +48,10 @@ struct DebugOverlay: View {
                 Text("Nearest \(train.line): bearing \(Int(bearing.rounded()))°, \(Int(train.distanceFromUserMeters)) m")
             }
             Text("Feed age \(Int(trainStore.feedAgeSeconds)) s")
+            if let error = trainStore.lastRefreshError {
+                Text("Last refresh: \(error)")
+                    .foregroundStyle(.orange)
+            }
             if let generated = trainStore.generatedAt {
                 Text(generated, style: .relative)
             }

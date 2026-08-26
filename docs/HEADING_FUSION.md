@@ -1,22 +1,21 @@
 # Landmark-free heading fusion
 
-UnderNYC runs ARKit with gravity-only world alignment. Absolute north belongs to
-`HeadingEstimator`; no landmark, compass arrow, or renderer may maintain a
-second yaw correction.
+UnderNYC no longer uses this estimator as Street mode's spatial authority.
+Street mode uses Apple's outdoor geotracking plus a tracked `ARGeoAnchor`, which
+provides the map-to-AR transform and an east/up/south local frame. Platform mode
+uses gravity-only tracking plus the user's one-tap incoming-track axis.
 
-At startup the user rotates the phone for five seconds. The estimator pairs
-ARKit camera yaw with timestamp-compatible Core Location headings, rejects poor
-Core Motion magnetic samples, and estimates the AR-world-to-true-north offset
-with circular statistics. GPS course may subsequently update that offset only
-while the device is moving with a sufficiently accurate course.
+`HeadingEstimator` remains available for diagnostics and experiments. It can
+pair ARKit camera yaw with timestamp-compatible Core Location headings, reject
+poor Core Motion magnetic samples, and estimate an AR-world-to-true-north offset
+with circular statistics. GPS course is never treated as camera direction.
 
-The estimator exposes a yaw covariance. Precise train geometry is enabled only
-at or below an 8-degree standard deviation. Above that threshold the scene root
-is disabled and the UI reports uncertainty; it never substitutes a precise
-marker. ARKit continues to supply relative orientation while absolute heading
-updates are unavailable.
+Its covariance is reported in diagnostics but never rotates geographic content
+or overrides an `ARGeoAnchor`. This prevents two competing heading corrections
+from making routes, markers, and arrows disagree.
 
-Core Location altitude seeds the vertical position and CMAltimeter stabilizes
-relative changes. Backend tunnel altitude and uncertainty remain approximate.
-City-scale rendering scales the complete 3D ray uniformly so bearing and
-elevation angle are preserved.
+Core Location altitude and CMAltimeter remain diagnostic inputs. The live train
+layer uses a clearly illustrative depth below the geo anchor's mapped ground;
+MTA does not publish tunnel altitude. Street rendering preserves literal
+horizontal metres and a fixed symbolic depth; perspective naturally makes a
+distant train appear smaller.
