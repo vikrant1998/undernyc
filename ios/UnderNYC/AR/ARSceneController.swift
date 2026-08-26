@@ -396,9 +396,12 @@ final class ARSceneController: NSObject, ObservableObject {
         }
         root.isEnabled = true
 
-        let renderTrains = displayMode == .arrival
-            ? trains.filter { $0.id == selectedID }
-            : trains
+        // The API response is a discovery set, not twenty simultaneous AR
+        // targets. City compression otherwise packs kilometres of service
+        // into a narrow ring around the viewer and falsely looks like a crowd
+        // of trains under one sidewalk. Render only the actively selected
+        // train; the discovery sheet remains available to switch targets.
+        let renderTrains = trains.filter { $0.id == selectedID }
         let activeIDs = Set(renderTrains.map(\.id))
         for (id, entity) in markers where !activeIDs.contains(id) {
             entity.removeFromParent()

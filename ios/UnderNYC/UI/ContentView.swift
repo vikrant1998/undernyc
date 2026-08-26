@@ -356,9 +356,9 @@ private struct HeaderView: View {
                 Text(
                     store.isCinematicDemoEnabled
                         ? "2 simulated trains"
-                        : store.trains.count == store.allNearbyTrains.count
-                        ? "\(store.trains.count) live nearby"
-                        : "\(store.trains.count) of \(store.allNearbyTrains.count) nearby"
+                        : store.selectedTrain == nil
+                        ? "\(store.allNearbyTrains.count) live nearby"
+                        : "Tracking 1 of \(store.allNearbyTrains.count) nearby"
                 )
                     .font(.caption)
                     .foregroundStyle(.secondary)

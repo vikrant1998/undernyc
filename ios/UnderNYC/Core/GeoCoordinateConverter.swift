@@ -38,8 +38,9 @@ enum GeoCoordinateConverter {
         // Log compression keeps city-scale geometry renderable while staying
         // strictly monotonic. A former hard 55 m cap collapsed every radial
         // point beyond ~261 m onto the same location, erasing whole segments.
-        let compressedDistance = 40
-            + 8 * log1p((horizontalDistance - 40) / 40)
+        let compressedDistance = displayedHorizontalDistance(
+            for: horizontalDistance
+        )
         let scale = Float(compressedDistance / horizontalDistance)
         position.x *= scale
         position.z *= scale
@@ -81,6 +82,19 @@ enum GeoCoordinateConverter {
             local.y,
             correctedZ
         )
+    }
+
+    /// Maps a real horizontal distance into the city-overview AR radius.
+    /// Entity dimensions must use `uniformDisplayScale` so their apparent
+    /// angular size remains consistent with this position mapping.
+    static func displayedHorizontalDistance(for distanceMeters: Double) -> Double {
+        guard distanceMeters > 40 else { return max(0, distanceMeters) }
+        return 40 + 8 * log1p((distanceMeters - 40) / 40)
+    }
+
+    static func uniformDisplayScale(for distanceMeters: Double) -> Float {
+        guard distanceMeters > 40 else { return 1 }
+        return Float(displayedHorizontalDistance(for: distanceMeters) / distanceMeters)
     }
 
     static func bearingDegrees(

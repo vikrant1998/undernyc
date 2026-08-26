@@ -61,8 +61,11 @@ enum TrainEntityFactory {
         }
         if entity.children.contains(where: { $0.name == "uncertain-single-car" }) {
             // Keep an uncertain estimate recognizable as a train without
-            // implying that a full consist occupies this exact point.
-            entity.scale = SIMD3(repeating: selected ? 0.30 : 0.18)
+            // implying that a full consist occupies this exact point. It must
+            // still use the same geographic scale as its AR position.
+            entity.scale = SIMD3(repeating: displayScale(
+                distanceMeters: distanceMeters
+            ))
             return
         }
         entity.scale = SIMD3(repeating: visualScale(
@@ -107,18 +110,14 @@ enum TrainEntityFactory {
         return root
     }
 
-    /// Full physical scale nearby, reduced smoothly for city-scale targets.
+    /// Full physical scale nearby, then exactly the uniform scale implied by
+    /// the city-overview distance compression. An independently tuned LOD
+    /// scale made trains appear progressively larger than their displayed
+    /// distance and was especially misleading beyond a few hundred metres.
     static func displayScale(distanceMeters: Float) -> Float {
-        guard distanceMeters > 80 else { return 0.34 }
-        if distanceMeters <= 250 {
-            let t = (distanceMeters - 80) / 170
-            return 0.34 - 0.06 * t
-        }
-        if distanceMeters <= 1_000 {
-            let t = (distanceMeters - 250) / 750
-            return 0.28 - 0.10 * t
-        }
-        return max(0.07, 0.18 * sqrt(1_000 / distanceMeters))
+        GeoCoordinateConverter.uniformDisplayScale(
+            for: Double(max(0, distanceMeters))
+        )
     }
 
     static func visualScale(
@@ -128,9 +127,7 @@ enum TrainEntityFactory {
         lifeSized: Bool = false
     ) -> Float {
         if lifeSized { return 1 }
-        if !showDetailedModel { return selected ? 0.30 : 0.18 }
         return displayScale(distanceMeters: distanceMeters)
-            * (selected ? 1.06 : 1)
     }
 
     static func displayedTrackGauge(
