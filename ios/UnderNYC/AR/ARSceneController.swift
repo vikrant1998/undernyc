@@ -605,7 +605,8 @@ final class ARSceneController: NSObject, ObservableObject {
         // instead of rendering a convincingly wrong city direction.
         let orientationIsUsable = displayMode == .arrival
             ? arrivalAligned
-            : streetLocalizationMode.isPrecise && geoOriginTransform != nil
+            : cinematicDemoEnabled
+                || (streetLocalizationMode.isPrecise && geoOriginTransform != nil)
         guard orientationIsUsable else {
             root.isEnabled = false
             edgeIndicator = EdgeIndicatorState()
@@ -949,8 +950,14 @@ final class ARSceneController: NSObject, ObservableObject {
     private func cinematicDemoPath(for train: NearbyTrain) -> [SIMD3<Float>] {
         guard let frame = arView.session.currentFrame else {
             let y: Float = -14
-            return stride(from: Float(0), through: 190, by: 10).map {
-                SIMD3<Float>(0, y, -$0)
+            // A sync can arrive in the same run-loop turn that resets the AR
+            // session, before ARKit publishes its first camera frame. Use the
+            // reset session's canonical forward direction (-Z), with the same
+            // toward-the-viewer motion as the frame-derived path below. The
+            // old fallback began at the camera and moved away, leaving most of
+            // a life-size consist behind the viewer.
+            return stride(from: Float(0), through: 230, by: 10).map {
+                SIMD3<Float>(0, y, -115 + $0)
             }
         }
         let transform = frame.camera.transform
