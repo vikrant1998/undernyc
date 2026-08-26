@@ -85,6 +85,7 @@ final class ARSceneController: NSObject, ObservableObject {
     private var routeEntity: Entity?
     private var arrivalAxisForward: SIMD3<Float>?
     private var arrivalAnchorPosition: SIMD3<Float>?
+    private var arrivalInitialDistanceMeters: Double?
     private var indicatorTimer: Timer?
     private var isRunning = false
     private var geoAvailabilityCheckInFlight = false
@@ -271,6 +272,17 @@ final class ARSceneController: NSObject, ObservableObject {
             frame.camera.transform.columns.3.y,
             frame.camera.transform.columns.3.z
         )
+        if let selectedID,
+           let train = latestTrains[selectedID],
+           let nextStop = visualProgress[selectedID]?.nextStopChainageMeters
+                ?? train.nextStopChainageMeters,
+           let current = visualProgress[selectedID]?.chainage(
+                at: ProcessInfo.processInfo.systemUptime
+           ) ?? train.meanChainageMeters {
+            arrivalInitialDistanceMeters = max(1, nextStop - current)
+        } else {
+            arrivalInitialDistanceMeters = nil
+        }
         arrivalAligned = true
         root.isEnabled = true
         resyncCurrentScene()
@@ -286,6 +298,7 @@ final class ARSceneController: NSObject, ObservableObject {
     func clearArrivalAlignment() {
         arrivalAxisForward = nil
         arrivalAnchorPosition = nil
+        arrivalInitialDistanceMeters = nil
         arrivalAligned = false
         if displayMode == .arrival { root.isEnabled = false }
     }
@@ -478,7 +491,8 @@ final class ARSceneController: NSObject, ObservableObject {
                 to: entity,
                 train: train,
                 selected: train.id == selectedID,
-                distanceMeters: geographicDistance
+                distanceMeters: geographicDistance,
+                lifeSized: displayMode == .arrival
             )
             updateMarkerOrientation(for: train, entity: entity)
             if displayMode == .street {
@@ -548,7 +562,15 @@ final class ARSceneController: NSObject, ObservableObject {
             let visualDistance = arrivalVisualDistance(
                 physicalMeters: distanceToStation
             )
-            return anchor + axis * visualDistance + SIMD3<Float>(0, -0.75, 0)
+            // `visualDistance` locates the leading end of the train. Keep the
+            // consist behind it in the tunnel instead of centering 157 m of
+            // cars on the platform/camera.
+            return anchor
+                + axis * (
+                    visualDistance
+                        + TrainEntityFactory.physicalConsistLengthMeters / 2
+                )
+                + SIMD3<Float>(0, -0.75, 0)
         }
         if let path = projectedMarkerPaths[train.id],
            let position = RouteRenderer.position(
@@ -578,7 +600,8 @@ final class ARSceneController: NSObject, ObservableObject {
             selected: selected,
             showDetailedModel: detailed,
             distanceMeters: Float(train.distanceFromUserMeters),
-            lifeSized: train.positionMethod == "cinematic_demo" && selected
+            lifeSized: displayMode == .arrival
+                || (train.positionMethod == "cinematic_demo" && selected)
         )
         return trackPosition + SIMD3<Float>(0, height, 0)
     }
@@ -775,7 +798,14 @@ final class ARSceneController: NSObject, ObservableObject {
     }
 
     private func arrivalVisualDistance(physicalMeters: Double) -> Float {
-        Float(min(42, max(5, sqrt(max(0, physicalMeters)) * 2.4)))
+        guard let initial = arrivalInitialDistanceMeters, initial > 0 else {
+            return 100
+        }
+        let remainingFraction = min(max(physicalMeters / initial, 0), 1)
+        // The train nose moves linearly through a 95 m visible approach over
+        // the realtime ETA. This is intentionally station-centric: it shows
+        // arrival progress without claiming exact indoor geographic position.
+        return Float(5 + 95 * remainingFraction)
     }
 
     private func redrawSelectedRoute(origin: CLLocationCoordinate2D) {
@@ -847,7 +877,9 @@ final class ARSceneController: NSObject, ObservableObject {
             return container
         }
         let vertical = SIMD3<Float>(0, -0.75, 0)
-        let trackStart = anchor + axis * 46 + vertical
+        let trackStart = anchor
+            + axis * (115 + TrainEntityFactory.physicalConsistLengthMeters)
+            + vertical
         let trackEnd = anchor - axis * 8 + vertical
         var crossTrack = simd_cross(SIMD3<Float>(0, 1, 0), axis)
         if simd_length(crossTrack) < 0.001 {
@@ -862,7 +894,11 @@ final class ARSceneController: NSObject, ObservableObject {
                 color: UIColor(white: 0.72, alpha: 0.85)
             ))
         }
-        for distance in stride(from: Float(-6), through: 44, by: 3.0) {
+        for distance in stride(
+            from: Float(-6),
+            through: 110 + TrainEntityFactory.physicalConsistLengthMeters,
+            by: 3.0
+        ) {
             let center = anchor + axis * distance + vertical
             container.addChild(makeSegment(
                 from: center - crossTrack * 0.82,

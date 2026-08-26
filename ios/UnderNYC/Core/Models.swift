@@ -16,7 +16,7 @@ enum ARDisplayMode: String, CaseIterable, Identifiable, Sendable {
     case arrival
 
     var id: String { rawValue }
-    var label: String { self == .street ? "Street" : "Arrival" }
+    var label: String { self == .street ? "Street" : "Platform" }
 }
 
 struct NearbyTrain: Codable, Identifiable, Equatable, Sendable {

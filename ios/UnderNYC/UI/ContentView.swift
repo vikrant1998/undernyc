@@ -40,6 +40,7 @@ struct ContentView: View {
                     store: trainStore,
                     showDiagnostics: $showDiagnostics,
                     showFilters: $showTrainFilters,
+                    displayMode: $displayMode,
                     cinematicDemoEnabled: cinematicDemoEnabled,
                     toggleDemo: { setCinematicDemo(!cinematicDemoEnabled) }
                 )
@@ -345,6 +346,7 @@ private struct HeaderView: View {
     @ObservedObject var store: TrainStore
     @Binding var showDiagnostics: Bool
     @Binding var showFilters: Bool
+    @Binding var displayMode: ARDisplayMode
     let cinematicDemoEnabled: Bool
     let toggleDemo: () -> Void
 
@@ -364,6 +366,22 @@ private struct HeaderView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button {
+                if displayMode == .street && cinematicDemoEnabled {
+                    toggleDemo()
+                }
+                displayMode = displayMode == .street ? .arrival : .street
+            } label: {
+                Label(
+                    displayMode == .street ? "Platform" : "Street",
+                    systemImage: displayMode == .street ? "tram.fill" : "building.2.fill"
+                )
+                .font(.caption.bold())
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .background(.thinMaterial, in: Capsule())
+            }
+            .buttonStyle(.plain)
             Button(action: toggleDemo) {
                 Label(
                     cinematicDemoEnabled ? "Live" : "Demo",

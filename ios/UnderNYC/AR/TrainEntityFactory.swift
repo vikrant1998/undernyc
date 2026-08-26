@@ -15,6 +15,8 @@ enum TrainEntityFactory {
     private static let carGap: Float = 0.15
     private static let carWidth: Float = 2.67
     private static let carHeight: Float = 3.62
+    static let physicalConsistLengthMeters = Float(carCount) * carLength
+        + Float(carCount - 1) * carGap
 
     static func makeMarker(
         for train: NearbyTrain,
@@ -45,7 +47,8 @@ enum TrainEntityFactory {
         to entity: ModelEntity,
         train: NearbyTrain,
         selected: Bool,
-        distanceMeters: Float
+        distanceMeters: Float,
+        lifeSized: Bool = false
     ) {
         let routeColor = UIColor(hex: train.routeColor)
         entity.visit { child in
@@ -72,7 +75,8 @@ enum TrainEntityFactory {
             selected: selected,
             showDetailedModel: true,
             distanceMeters: distanceMeters,
-            lifeSized: train.positionMethod == "cinematic_demo" && selected
+            lifeSized: lifeSized
+                || (train.positionMethod == "cinematic_demo" && selected)
         ))
     }
 
